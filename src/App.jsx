@@ -894,12 +894,14 @@ function TargetsView({ targets, setTargets, activeTarget, setActiveTarget, findi
 
 // ── Proxy view ────────────────────────────────────────────────────────────
 function ProxyView({ proxyReqs, setProxyReqs, onSendToRepeater }) {
-  const [selected,   setSelected]   = useState(null);
-  const [filter,     setFilter]     = useState('');
-  const [flagOnly,   setFlagOnly]   = useState(false);
-  const [intercept,  setIntercept]  = useState(false);
-  const [heldReqs,   setHeldReqs]   = useState([]);
-  const [certMsg,    setCertMsg]    = useState('');
+  const [selected,        setSelected]        = useState(null);
+  const [filter,          setFilter]          = useState('');
+  const [flagOnly,        setFlagOnly]        = useState(false);
+  const [intercept,       setIntercept]       = useState(false);
+  const [heldReqs,        setHeldReqs]        = useState([]);
+  const [certMsg,         setCertMsg]         = useState('');
+  const [analyzing,       setAnalyzing]       = useState(false);
+  const [analysisFindings, setAnalysisFindings] = useState([]);
 
   // Poll intercept queue when intercept mode is on
   useEffect(() => {
@@ -924,6 +926,29 @@ function ProxyView({ proxyReqs, setProxyReqs, onSendToRepeater }) {
     const r = await API.cert.install();
     setCertMsg(r.ok ? `✓ Installed (${r.scope || 'keychain'})` : `✗ ${r.error || 'Failed'}`);
     setTimeout(() => setCertMsg(''), 5000);
+  }
+
+  async function analyzeTraffic() {
+    setAnalyzing(true);
+    setAnalysisFindings([]);
+    try {
+      const history = proxyReqs.slice(0, 50).map(r => ({
+        url: r.url, method: r.method, body: r.body || '',
+        requestHeaders: r.headers || {}, responseBody: r.response?.body || '',
+        flagged: r.flagged, vulns: r.vulns || [],
+      }));
+      const resp = await fetch('http://localhost:8000/proxy/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ history }),
+      });
+      const data = await resp.json();
+      setAnalysisFindings(data.findings || []);
+    } catch (e) {
+      setAnalysisFindings([{ severity: 'INFO', description: `Analysis failed: ${e.message}` }]);
+    } finally {
+      setAnalyzing(false);
+    }
   }
 
   async function exportTrafficEvidence() {
@@ -990,8 +1015,24 @@ function ProxyView({ proxyReqs, setProxyReqs, onSendToRepeater }) {
             <button onClick={installCert} title="Install CA Certificate in system keychain" style={{ fontSize:8.5, padding:'3px 8px', borderRadius:5, cursor:'pointer', border:'1px solid #f59e0b30', background:'#f59e0b10', color:'#f59e0b', fontFamily:'var(--font-mono)' }}>
               {certMsg || 'Install CA'}
             </button>
+            <button onClick={analyzing ? undefined : analyzeTraffic} title="AI analysis of captured traffic for vulnerabilities" style={{ fontSize:8.5, padding:'3px 8px', borderRadius:5, cursor: analyzing ? 'wait' : 'pointer', border:'1px solid #8b5cf640', background:'#8b5cf612', color:'#8b5cf6', fontFamily:'var(--font-mono)' }}>
+              {analyzing ? '⟳ Analyzing…' : '🧠 Analyze'}
+            </button>
             <button onClick={clearHistory} style={{ marginLeft:'auto', fontSize:8.5, padding:'3px 8px', borderRadius:5, cursor:'pointer', border:'1px solid #1e1e30', background:'transparent', color:'#555', fontFamily:'var(--font-mono)' }}>Clear</button>
           </div>
+          {analysisFindings.length > 0 && (
+            <div style={{ padding:'8px 12px', background:'#0d0d1f', borderBottom:'1px solid #1e1e30' }}>
+              <div style={{ fontFamily:'var(--font-mono)', fontSize:8, color:'#8b5cf6', marginBottom:5, letterSpacing:1.5 }}>AI ANALYSIS — {analysisFindings.length} FINDINGS</div>
+              {analysisFindings.map((f, i) => (
+                <div key={i} style={{ display:'flex', gap:6, alignItems:'flex-start', marginBottom:3 }}>
+                  <span style={{ fontFamily:'var(--font-mono)', fontSize:8, padding:'1px 5px', borderRadius:3, background: f.severity==='CRITICAL'?'#ef444420':f.severity==='HIGH'?'#f9731620':'#8b5cf620', color: f.severity==='CRITICAL'?'#ef4444':f.severity==='HIGH'?'#fb923c':'#8b5cf6', whiteSpace:'nowrap', flexShrink:0 }}>
+                    {f.severity}
+                  </span>
+                  <span style={{ fontSize:10, color:'#c0c0e0' }}>{f.description}</span>
+                </div>
+              ))}
+            </div>
+          )}
           <div style={{ padding:'6px 10px', borderBottom:'1px solid #141420' }}>
             <input value={filter} onChange={e=>setFilter(e.target.value)} placeholder="Filter by URL…"
               style={{ width:'100%', padding:'6px 10px', fontSize:11.5 }} />
@@ -2552,16 +2593,49 @@ function AutopilotView({ defaultHost, onNewFindings }) {
 // Renders a simple SVG-based force-directed graph built from findings.
 // Each tool becomes a node connected to the target root node, and each
 // finding is a leaf node connected to its tool.
+// Kill-chain phase colors (matches graph_builder.py PHASE_META)
+const KILL_CHAIN_COLORS = {
+  root:       '#1e3a5f',
+  initial:    '#3b82f6',
+  foothold:   '#f97316',
+  escalation: '#ef4444',
+  impact:     '#111827',
+  unknown:    '#6b7280',
+};
+
 function GraphView({ findings, targetHost }) {
   const canvasRef = useRef(null);
-  const [selected, setSelected] = useState(null);
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 80, y: 60 });
-  const [drag, setDrag] = useState(null);
+  const [selected, setSelected]           = useState(null);
+  const [zoom, setZoom]                   = useState(1);
+  const [pan, setPan]                     = useState({ x: 80, y: 60 });
+  const [drag, setDrag]                   = useState(null);
+  const [killChainData, setKillChainData] = useState(null);  // backend-computed graph
+  const [buildingGraph, setBuildingGraph] = useState(false);
+  const [graphError, setGraphError]       = useState('');
   const WORLD_W = 1600;
   const WORLD_H = 980;
 
   const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+
+  // Build exploitation graph from backend
+  async function buildExploitationGraph() {
+    setBuildingGraph(true);
+    setGraphError('');
+    try {
+      const resp = await fetch('http://localhost:8000/graph/build', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ findings, target: targetHost }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      setKillChainData(data);
+    } catch (e) {
+      setGraphError(`Graph build failed: ${e.message}`);
+    } finally {
+      setBuildingGraph(false);
+    }
+  }
 
   // Build graph nodes and edges from findings
   const { nodes, edges } = useMemo(() => {
@@ -2652,24 +2726,65 @@ function GraphView({ findings, targetHost }) {
   }
 
   const nodeColor = n => {
+    // Kill-chain phase color takes priority when backend graph is loaded
+    if (n.phase && KILL_CHAIN_COLORS[n.phase]) return KILL_CHAIN_COLORS[n.phase];
     if (n.type === 'target')  return '#ff4500';
     if (n.type === 'tool')    return AGENTS[TOOLS[n.tool]?.agent]?.color || '#8b5cf6';
     return SEV[n.sev]?.fg || '#60a5fa';
   };
-  const nodeRadius = n => n.type === 'target' ? 22 : n.type === 'tool' ? 15 : 9;
+  const nodeRadius = n => n.type === 'target' || n.is_root ? 22 : n.type === 'tool' ? 15 : 9;
+
+  // Use backend kill-chain layout if available, else local tool-ring layout
+  const displayNodes = killChainData ? (() => {
+    const W = WORLD_W, H = WORLD_H;
+    const phaseX = { root: W/2, initial: W*0.2, foothold: W*0.4, escalation: W*0.65, impact: W*0.85, unknown: W*0.5 };
+    return (killChainData.nodes || []).map((n, i) => ({
+      ...n,
+      x: phaseX[n.phase] ?? W/2,
+      y: H * 0.2 + (i % 6) * (H * 0.12),
+    }));
+  })() : nodes;
+  const displayEdges = killChainData ? (killChainData.edges || []) : edges;
 
   return (
     <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ padding: '10px 16px', background: '#08080f', borderBottom: '1px solid #1e1e30', flexShrink: 0 }}>
-        <SectionHeader icon="◎" title="ATTACK GRAPH" subtitle={`${nodes.length} nodes · ${edges.length} edges · privilege-path mapping`} color="#8b5cf6" />
+      <div style={{ padding: '10px 16px', background: '#08080f', borderBottom: '1px solid #1e1e30', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 12 }}>
+        <SectionHeader icon="◎" title="ATTACK GRAPH" subtitle={`${displayNodes.length} nodes · ${displayEdges.length} edges · kill-chain mapping`} color="#8b5cf6" />
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+          {graphError && <span style={{ fontSize: 11, color: '#ef4444' }}>{graphError}</span>}
+          {killChainData && (
+            <span style={{ fontSize: 10, color: '#6b7280', fontFamily: 'var(--font-mono)' }}>
+              Risk: {killChainData.risk_score?.toFixed(1)}/10
+            </span>
+          )}
+          <button
+            onClick={buildingGraph ? undefined : buildExploitationGraph}
+            style={{ padding: '4px 12px', borderRadius: 6, border: '1px solid #8b5cf6', background: buildingGraph ? '#1e1e30' : '#1e1e30', color: '#8b5cf6', cursor: buildingGraph ? 'wait' : 'pointer', fontFamily: 'var(--font-mono)', fontSize: 10, whiteSpace: 'nowrap' }}
+          >
+            {buildingGraph ? '⟳ Building…' : '⚡ Build Exploit Graph'}
+          </button>
+          {killChainData && (
+            <button
+              onClick={() => setKillChainData(null)}
+              style={{ padding: '4px 10px', borderRadius: 6, border: '1px solid #333', background: 'transparent', color: '#666', cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 10 }}
+            >
+              Reset
+            </button>
+          )}
+        </div>
       </div>
+      {killChainData?.summary && (
+        <div style={{ padding: '6px 16px', background: '#0a0a14', fontSize: 11, color: '#64748b', borderBottom: '1px solid #1e1e30' }}>
+          {killChainData.summary}
+        </div>
+      )}
 
       <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-        {nodes.length <= 1 ? (
+        {displayNodes.length <= 1 ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', flexDirection: 'column', gap: 12, opacity: 0.25 }}>
             <div style={{ fontSize: 70, color: '#8b5cf6' }}>◎</div>
             <div style={{ fontFamily: 'var(--font-display)', fontSize: 13, color: '#8b5cf6', letterSpacing: 3 }}>NO GRAPH DATA</div>
-            <div style={{ fontSize: 12, color: '#555' }}>Run agents to populate the attack graph</div>
+            <div style={{ fontSize: 12, color: '#555' }}>Run agents or click "Build Exploit Graph" to map the attack chain</div>
           </div>
         ) : (
           <div
@@ -2689,32 +2804,39 @@ function GraphView({ findings, targetHost }) {
               </defs>
               <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
                 {/* Edges */}
-                {edges.map((e, i) => {
-                  const from = nodes.find(n => n.id === e.from);
-                  const to   = nodes.find(n => n.id === e.to);
+                {displayEdges.map((e, i) => {
+                  const from = displayNodes.find(n => n.id === (e.from || e.source));
+                  const to   = displayNodes.find(n => n.id === (e.to   || e.target));
                   if (!from || !to) return null;
+                  const edgeColor = from.phase ? (KILL_CHAIN_COLORS[from.phase] || '#8b5cf6') : '#8b5cf6';
                   return (
                     <line key={i}
                       x1={from.x} y1={from.y} x2={to.x} y2={to.y}
-                      stroke="#8b5cf620" strokeWidth={1.5} markerEnd="url(#arrow)" />
+                      stroke={`${edgeColor}40`} strokeWidth={1.5} markerEnd="url(#arrow)" />
                   );
                 })}
                 {/* Nodes */}
-                {nodes.map(n => {
+                {displayNodes.map(n => {
                   const col = nodeColor(n);
                   const r   = nodeRadius(n);
                   const sel = selected?.id === n.id;
+                  const icon = n.is_root || n.type === 'target' ? '⬡' : n.phase === 'initial' ? '◉' : n.phase === 'foothold' ? '▲' : n.phase === 'escalation' ? '⚡' : n.phase === 'impact' ? '☠' : n.type === 'tool' ? '⚙' : '!';
                   return (
                     <g key={n.id} style={{ cursor: 'pointer' }} onClick={() => setSelected(n)}>
                       <circle cx={n.x} cy={n.y} r={r + 5} fill={`${col}0c`} stroke={`${col}18`} strokeWidth={1} />
                       <circle cx={n.x} cy={n.y} r={r} fill={`${col}20`} stroke={col} strokeWidth={sel ? 2.5 : 1.5} />
                       <text x={n.x} y={n.y + 4} textAnchor="middle" fill={col}
-                        fontSize={n.type === 'target' ? 12 : 10} fontFamily="JetBrains Mono" fontWeight="700">
-                        {n.type === 'target' ? '⬡' : n.type === 'tool' ? '⚙' : '!'}
+                        fontSize={n.is_root || n.type === 'target' ? 12 : 10} fontFamily="JetBrains Mono" fontWeight="700">
+                        {icon}
                       </text>
                       <text x={n.x} y={n.y + r + 12} textAnchor="middle" fill="#666" fontSize={8} fontFamily="JetBrains Mono">
-                        {n.label.substring(0, 20)}
+                        {(n.label || '').substring(0, 20)}
                       </text>
+                      {n.phase && n.phase !== 'root' && (
+                        <text x={n.x} y={n.y + r + 22} textAnchor="middle" fill={col} fontSize={7} fontFamily="JetBrains Mono" opacity="0.7">
+                          {n.phase}
+                        </text>
+                      )}
                     </g>
                   );
                 })}
@@ -2746,9 +2868,14 @@ function GraphView({ findings, targetHost }) {
               <button onClick={() => setSelected(null)} style={{ marginLeft: 'auto', background: 'transparent', border: 'none', color: '#555', fontSize: 15, cursor: 'pointer' }}>×</button>
             </div>
             <div style={{ fontSize: 11.5, color: '#e8e8f0', lineHeight: 1.85 }}>
-              <div><span style={{ color: '#555' }}>Type: </span>{selected.type}</div>
+              {selected.phase_label && <div><span style={{ color: '#555' }}>Phase: </span><span style={{ color: KILL_CHAIN_COLORS[selected.phase] || '#8b5cf6' }}>{selected.phase_label}</span></div>}
               <div><span style={{ color: '#555' }}>Label: </span>{selected.label}</div>
-              {selected.sev && <div><span style={{ color: '#555' }}>Severity: </span><SevBadge sev={selected.sev} /></div>}
+              {(selected.sev || selected.severity) && <div><span style={{ color: '#555' }}>Severity: </span><SevBadge sev={selected.sev || selected.severity} /></div>}
+              {selected.tool && <div><span style={{ color: '#555' }}>Tool: </span>{selected.tool}</div>}
+              {selected.cvss !== undefined && <div><span style={{ color: '#555' }}>CVSS: </span>{selected.cvss}</div>}
+              {selected.description && (
+                <div style={{ marginTop: 7, fontSize: 10.5, color: '#c0c0e0', lineHeight: 1.7 }}>{selected.description}</div>
+              )}
               {selected.finding && (
                 <div style={{ marginTop: 7, fontSize: 10.5, color: '#888', lineHeight: 1.7 }}>
                   <div>Tool: {selected.finding.tool}</div>
@@ -3011,9 +3138,73 @@ function DeveloperView({ findings, proxyReqs, targetHost }) {
 
 // ── Intelligence / Memory view ────────────────────────────────────────────
 function IntelView({ learned, onClearLearned }) {
+  const [activeModel,    setActiveModel]    = useState('');
+  const [trainingRuns,   setTrainingRuns]   = useState([]);
+  const [training,       setTraining]       = useState(false);
+  const [trainMsg,       setTrainMsg]       = useState('');
+
+  useEffect(() => {
+    // Fetch active model + training history on mount
+    fetch('http://localhost:8000/ollama/active-model').then(r => r.json()).then(d => setActiveModel(d.model || '')).catch(() => {});
+    fetch('http://localhost:8000/ollama/training-history').then(r => r.json()).then(d => setTrainingRuns(d.runs || [])).catch(() => {});
+  }, []);
+
+  async function triggerTrain() {
+    setTraining(true);
+    setTrainMsg('Training…');
+    try {
+      const resp = await fetch('http://localhost:8000/ollama/train', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_name: 'phantom-security:latest', base_model: activeModel || 'llama3.1', max_findings: 500 }),
+      });
+      const data = await resp.json();
+      setTrainMsg(`✓ Done — ${data.examples || 0} examples`);
+      fetch('http://localhost:8000/ollama/training-history').then(r => r.json()).then(d => setTrainingRuns(d.runs || [])).catch(() => {});
+    } catch (e) {
+      setTrainMsg(`✗ ${e.message}`);
+    } finally {
+      setTraining(false);
+      setTimeout(() => setTrainMsg(''), 6000);
+    }
+  }
+
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
       <SectionHeader icon="🧠" title="INTELLIGENCE & MEMORY" subtitle="Chroma vector DB · Redis cache · Neo4j attack graph · Local pattern learning" color="#8b5cf6" />
+
+      {/* Active LLM model + training status */}
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="card-header" style={{ color: '#8b5cf6' }}>ACTIVE LLM MODEL</div>
+        <div style={{ padding: '12px 16px', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: '#10b981' }}>
+            {activeModel || 'Detecting…'}
+          </div>
+          <div style={{ padding: '2px 8px', borderRadius: 4, background: '#10b98115', border: '1px solid #10b98130', fontFamily: 'var(--font-mono)', fontSize: 9, color: '#10b981' }}>
+            Auto-training: ON
+          </div>
+          <button
+            onClick={training ? undefined : triggerTrain}
+            style={{ marginLeft: 'auto', padding: '4px 12px', borderRadius: 6, border: '1px solid #8b5cf640', background: '#8b5cf615', color: '#8b5cf6', cursor: training ? 'wait' : 'pointer', fontFamily: 'var(--font-mono)', fontSize: 10 }}
+          >
+            {trainMsg || (training ? '⟳ Training…' : '⚡ Train Now')}
+          </button>
+        </div>
+        {trainingRuns.length > 0 && (
+          <div style={{ padding: '0 16px 12px' }}>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: '#33334a', letterSpacing: 1.5, marginBottom: 6 }}>TRAINING HISTORY</div>
+            {trainingRuns.slice(0, 5).map((run, i) => (
+              <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4, fontSize: 10, color: '#888' }}>
+                <span style={{ color: run.status === 'success' ? '#10b981' : '#ef4444', fontFamily: 'var(--font-mono)', fontSize: 9 }}>
+                  {run.status === 'success' ? '✓' : '✗'}
+                </span>
+                <span style={{ fontFamily: 'var(--font-mono)', color: '#8b5cf6', fontSize: 9 }}>{run.model_name}</span>
+                <span style={{ color: '#555' }}>{(run.created_at || '').slice(0, 16)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
 

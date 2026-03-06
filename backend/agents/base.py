@@ -32,6 +32,43 @@ log = logging.getLogger(__name__)
 SEVERITIES   = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
 DEFAULT_CVSS = {"CRITICAL": 9.5, "HIGH": 7.5, "MEDIUM": 5.5, "LOW": 3.5, "INFO": 1.0}
 
+# ── Model auto-detection ──────────────────────────────────────────────
+# Preference order: security/coder models first, then general models
+_MODEL_PREFERENCE = [
+    "qwen3-coder", "qwen2.5-coder", "qwen2.5-coder:7b", "qwen2.5-coder:latest",
+    "codellama", "codellama:latest", "codellama:7b",
+    "llama3.1", "llama3.1:latest", "llama3", "llama3:latest",
+    "mistral", "mistral:latest",
+]
+_DETECTED_MODEL: Optional[str] = None
+
+
+def detect_best_model() -> str:
+    """
+    Query Ollama for installed models and pick the best one based on
+    _MODEL_PREFERENCE. Result is cached in _DETECTED_MODEL.
+    Falls back to 'llama3.1' if Ollama is unavailable.
+    """
+    global _DETECTED_MODEL
+    if _DETECTED_MODEL:
+        return _DETECTED_MODEL
+    try:
+        resp = httpx.get("http://localhost:11434/api/tags", timeout=3)
+        if resp.status_code == 200:
+            names = [m["name"] for m in resp.json().get("models", [])]
+            for pref in _MODEL_PREFERENCE:
+                base = pref.split(":")[0]
+                for name in names:
+                    if name == pref or name.startswith(base + ":") or name == base:
+                        _DETECTED_MODEL = name
+                        log.info(f"[model-detect] Selected model: {_DETECTED_MODEL}")
+                        return _DETECTED_MODEL
+    except Exception as e:
+        log.debug(f"[model-detect] Ollama query failed: {e}")
+    _DETECTED_MODEL = "llama3.1"
+    log.info(f"[model-detect] Fallback model: {_DETECTED_MODEL}")
+    return _DETECTED_MODEL
+
 # ── Wordlist paths (Kali / Homebrew installs) ────────────────────────
 WL_SMALL   = "/usr/share/wordlists/dirbuster/directory-list-2.3-small.txt"
 WL_MEDIUM  = "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt"
@@ -62,7 +99,7 @@ class BaseAgent(ABC):
         self,
         target:       str,
         target_type:  str                       = "web",
-        model:        str                       = "llama3.1",
+        model:        str                       = "",   # empty = auto-detect from Ollama
         depth:        str                       = "standard",
         max_iter:     int                       = 10,
         session_id:   str                       = "",
@@ -72,7 +109,7 @@ class BaseAgent(ABC):
     ):
         self.target          = target
         self.target_type     = target_type
-        self.model           = model
+        self.model           = model or detect_best_model()   # auto-detect if empty
         self.depth           = depth
         self.max_iter        = max_iter
         self.session_id      = session_id or str(uuid4())
@@ -119,32 +156,55 @@ class BaseAgent(ABC):
 
     # ── System prompt assembly ────────────────────────────────────────
 
-    def _build_system(self) -> str:
-        other_ctx = "\n".join(
-            f"  [{f['severity']}] {f['description'][:80]} ({f.get('agent','?')})"
-            for f in (self.other_findings or [])[:6]
-        )
-        return (
+    def _build_system(self, phase: str = "act") -> str:
+        """
+        Build the system prompt.
+        phase='plan' — iteration 1: produce a 3-step plan + first ACTION only.
+        phase='act'  — iterations 2+: strict THOUGHT/ACTION/ARGS/DONE format.
+        """
+        # Inject only top 5 highest-confidence learned patterns (not all of them)
+        learned_lines = []
+        if self.learned_ctx:
+            for line in self.learned_ctx.strip().splitlines()[:5]:
+                learned_lines.append(f"  {line.strip()}")
+        learned_block = "\n".join(learned_lines) if learned_lines else "  (none)"
+
+        header = (
             f"{self.persona}\n\n"
-            f"TARGET: {self.target}  |  TYPE: {self.target_type}  |  "
-            f"DEPTH: {self.depth}  |  MAX_ITER: {self.max_iter}\n\n"
-            f"AVAILABLE TOOLS: {', '.join(self.tools)}\n\n"
-            f"CONFIRMED PATTERNS FROM PAST SCANS (tool-verified only):\n{self.learned_ctx or '  (none yet)'}\n\n"
-            f"FINDINGS FROM OTHER AGENTS:\n{other_ctx or '  (none yet)'}\n\n"
-            "CRITICAL RULES — READ CAREFULLY:\n"
-            "1. NEVER output [SEVERITY] lines in your THOUGHT or HYPOTHESIS sections.\n"
-            "2. ONLY output [SEVERITY] lines when you see them VERBATIM in a tool's actual output.\n"
-            "3. If a tool finds nothing, do NOT invent findings. Output: DONE: true | SUMMARY: No issues found.\n"
-            "4. Do NOT repeat findings from previous iterations unless the tool confirmed them again.\n"
-            "5. Treat LEARNED PATTERNS as hints, not facts — verify each one with a tool before reporting.\n\n"
-            "FORMAT:\n"
-            "THOUGHT: <your reasoning>\n"
-            "HYPOTHESIS: <what you expect to find>\n"
-            "ACTION: <tool_name>\n"
-            "--- after seeing tool output ---\n"
-            "DONE: true | SUMMARY: <findings, citing tool name and evidence>\n\n"
-            "Be concise. Name real CLI tools in ACTION lines."
+            f"TARGET: {self.target}  |  TYPE: {self.target_type}  |  DEPTH: {self.depth}\n"
+            f"TOOLS: {', '.join(self.tools)}\n\n"
+            f"VERIFIED PATTERNS (tool-confirmed, top 5):\n{learned_block}\n\n"
         )
+
+        if phase == "plan":
+            return (
+                header +
+                "PLAN PHASE — write exactly these 4 lines and nothing else:\n"
+                "PLAN_1: <first tool to run and why in ≤15 words>\n"
+                "PLAN_2: <second tool and why>\n"
+                "PLAN_3: <third tool and why>\n"
+                "ACTION: <name of FIRST tool from your TOOLS list>\n\n"
+                "RULES: No [SEVERITY] lines. No invented findings. "
+                "Tool names must be exact CLI names from the TOOLS list above."
+            )
+        else:
+            return (
+                header +
+                "ACT PHASE — respond in this EXACT format only (max 4 sentences total):\n"
+                "THOUGHT: <one sentence — what you know from last tool output>\n"
+                "ACTION: <tool_name>  ← must be ONE exact name from TOOLS list\n"
+                "ARGS: <exact CLI arguments to pass to the tool>\n"
+                "DONE: false\n\n"
+                "OR if all planned tools have run and nothing critical remains:\n"
+                "DONE: true\n"
+                "SUMMARY: <one paragraph citing tool names and real evidence>\n\n"
+                "STRICT RULES (violation = wrong result):\n"
+                "1. NEVER write [SEVERITY] tags — only tool stdout may contain those.\n"
+                "2. NEVER invent findings. If tool found nothing → DONE: true.\n"
+                "3. ACTION must be exactly ONE tool name from your TOOLS list.\n"
+                "4. ARGS must be real CLI args, not pseudocode or placeholders.\n"
+                "5. Maximum 4 sentences in your entire response."
+            )
 
     # ── Main run loop ─────────────────────────────────────────────────
 
@@ -152,37 +212,46 @@ class BaseAgent(ABC):
         """
         Execute the ReAct loop and return all findings produced.
         Broadcasts rich status events so the UI stays in sync.
+
+        Phase 1 (iteration 1): plan phase — LLM outputs PLAN_1/2/3 + first ACTION.
+        Phase 2 (iterations 2+): act phase — strict THOUGHT/ACTION/ARGS/DONE format.
+        Forced tool call injected if LLM fails to produce ACTION: for 2 iterations.
         """
         await self.pre_run()
 
-        system = self._build_system()
         self._history = [
             {"role": "user",
              "content": f"Begin {self.agent_id} assessment of {self.target}. "
-                        f"Max {self.max_iter} iterations."}
+                        f"Max {self.max_iter} iterations. Use your TOOLS list."}
         ]
 
         await self._emit("agent_start", {
-            "agent": self.agent_id, "target": self.target, "max_iter": self.max_iter
+            "agent": self.agent_id, "target": self.target,
+            "max_iter": self.max_iter, "model": self.model,
         })
 
+        _no_action_streak = 0  # track consecutive iterations with no ACTION:
+
         for iteration in range(1, self.max_iter + 1):
-            await self._emit("agent_thinking", {"agent": self.agent_id, "iter": iteration})
+            phase = "plan" if iteration == 1 else "act"
+            system = self._build_system(phase=phase)
+            max_tokens = 1200 if iteration == 1 else 600
+
+            await self._emit("agent_thinking", {"agent": self.agent_id, "iter": iteration, "phase": phase})
 
             # ── LLM reasoning ─────────────────────────────────────
             full_text = ""
-            async for token in self._stream_llm(system):
+            async for token in self._stream_llm(system, max_tokens=max_tokens):
                 full_text += token
                 await self._emit("agent_token", {"agent": self.agent_id, "token": token, "iter": iteration})
 
             await self._emit("agent_thought", {"agent": self.agent_id, "text": full_text, "iter": iteration})
 
             # ── Parse structured fields ───────────────────────────
-            thought    = self._extract(r"THOUGHT:\s*(.*?)(?=HYPOTHESIS:|ACTION:|DONE:|$)", full_text)
-            hypothesis = self._extract(r"HYPOTHESIS:\s*(.*?)(?=ACTION:|REASON:|DONE:|$)",  full_text)
-            action_raw = self._extract(r"ACTION:\s*(\S+)",                                 full_text)
+            thought    = self._extract(r"THOUGHT:\s*(.*?)(?=ACTION:|DONE:|$)", full_text)
+            action_raw = self._extract(r"ACTION:\s*(\S+)",                     full_text)
             is_done    = bool(re.search(r"DONE:\s*true", full_text, re.I))
-            summary    = self._extract(r"SUMMARY:\s*([\s\S]*?)$",                          full_text)
+            summary    = self._extract(r"SUMMARY:\s*([\s\S]*?)$",              full_text)
 
             if is_done:
                 await self._emit("agent_done", {
@@ -193,13 +262,36 @@ class BaseAgent(ABC):
                 })
                 break
 
+            # ── Forced tool call guard ─────────────────────────────
+            if not action_raw:
+                _no_action_streak += 1
+            else:
+                _no_action_streak = 0
+
+            if _no_action_streak >= 2:
+                # LLM is stuck — inject a nudge to force it to pick a tool
+                self._history.append({
+                    "role": "user",
+                    "content": (
+                        f"You have not called a tool in {_no_action_streak} iterations. "
+                        f"You MUST now pick exactly one tool from: {', '.join(self.tools)}.\n"
+                        "Respond with only:\nACTION: <tool_name>\nDONE: false"
+                    )
+                })
+                _no_action_streak = 0
+                await self._emit("agent_nudge", {
+                    "agent": self.agent_id, "iter": iteration,
+                    "message": "Forcing tool call — LLM was not producing ACTION lines",
+                })
+                continue  # re-run LLM with nudge in history
+
             # ── Tool execution ─────────────────────────────────────
             tool = self._resolve_tool(action_raw)
             args = self.build_args(tool, self.target, self.depth)
 
             await self._emit("agent_action", {
-                "agent":      self.agent_id, "tool": tool, "iter": iteration,
-                "thought":    thought,        "hypothesis": hypothesis,
+                "agent": self.agent_id, "tool": tool,
+                "iter":  iteration,     "thought": thought,
             })
 
             result = await self._run_tool(tool, args)
@@ -222,19 +314,20 @@ class BaseAgent(ABC):
             self._history.append({
                 "role": "user",
                 "content": (
-                    f"TOOL [{tool}] output:\n{output[:1800]}\n\n"
-                    f"Findings this session: {len(self.findings)}. Continue."
+                    f"TOOL [{tool}] output (truncated to 1500 chars):\n{output[:1500]}\n\n"
+                    f"Findings confirmed so far: {len(self.findings)}. "
+                    "Proceed to next tool or DONE: true if finished."
                 )
             })
-            # Bounded window — keep first 2 (user init + first response) + last 22
-            if len(self._history) > 26:
-                self._history = self._history[:2] + self._history[-22:]
+            # Bounded window — keep first 2 (user init + first response) + last 20
+            if len(self._history) > 24:
+                self._history = self._history[:2] + self._history[-20:]
 
         # Ensure done is always broadcast even on max_iter hit
         await self._emit("agent_done", {
             "agent":    self.agent_id,
             "findings": len(self.findings),
-            "summary":  f"Completed. {len(self.findings)} findings.",
+            "summary":  f"Completed {self.max_iter} iterations. {len(self.findings)} findings confirmed.",
         })
 
         await self.post_run()
@@ -242,34 +335,46 @@ class BaseAgent(ABC):
 
     # ── LLM streaming ─────────────────────────────────────────────────
 
-    async def _stream_llm(self, system: str) -> AsyncGenerator[str, None]:
+    async def _stream_llm(self, system: str, max_tokens: int = 600) -> AsyncGenerator[str, None]:
+        """
+        Stream tokens from Ollama. Retries up to 3 times on connection errors.
+        max_tokens=1200 for plan phase (iter 1), 600 for act phase (iter 2+).
+        """
         payload = {
             "model":    self.model,
             "messages": self._history,
             "stream":   True,
             "system":   system,
-            "options":  {"temperature": 0.15, "num_predict": 1600},
+            "options":  {"temperature": 0.15, "num_predict": max_tokens},
         }
-        try:
-            async with httpx.AsyncClient(timeout=180) as client:
-                async with client.stream("POST", f"{self.OLLAMA_URL}/api/chat", json=payload) as resp:
-                    if resp.status_code != 200:
-                        yield f"\n[LLM error {resp.status_code}]"
-                        return
-                    async for line in resp.aiter_lines():
-                        if not line.strip():
-                            continue
-                        try:
-                            data  = json.loads(line)
-                            token = data.get("message", {}).get("content", "")
-                            if token:
-                                yield token
-                            if data.get("done"):
-                                return
-                        except json.JSONDecodeError:
-                            continue
-        except Exception as e:
-            yield f"\n[Ollama connection error: {e}]\n"
+        last_err: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=180) as client:
+                    async with client.stream("POST", f"{self.OLLAMA_URL}/api/chat", json=payload) as resp:
+                        if resp.status_code != 200:
+                            yield f"\n[LLM error {resp.status_code}]"
+                            return
+                        async for line in resp.aiter_lines():
+                            if not line.strip():
+                                continue
+                            try:
+                                data  = json.loads(line)
+                                token = data.get("message", {}).get("content", "")
+                                if token:
+                                    yield token
+                                if data.get("done"):
+                                    return
+                            except json.JSONDecodeError:
+                                continue
+                return  # success — exit retry loop
+            except Exception as e:
+                last_err = e
+                if attempt < 2:
+                    log.warning(f"[{self.agent_id}] Ollama error (attempt {attempt+1}/3): {e}")
+                    await asyncio.sleep(2 * (attempt + 1))  # 2s, 4s backoff
+                else:
+                    yield f"\n[Ollama connection error after 3 retries: {last_err}]\n"
 
     # ── Tool runner ────────────────────────────────────────────────────
 

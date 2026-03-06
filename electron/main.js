@@ -435,22 +435,42 @@ function registerIPC() {
       return;
     }
 
-    // macOS: try login keychain first, then system keychain
+    // macOS: pre-check → osascript elevation → login keychain fallback → clipboard + instructions
     if (process.platform === 'darwin') {
-      const loginKC = path.join(app.getPath('home'), 'Library', 'Keychains', 'login.keychain-db');
-      const cmds = [
-        `security add-trusted-cert -d -r trustRoot -k "${loginKC}" "${certPath}"`,
-        `security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "${certPath}"`,
-      ];
-      for (let i = 0; i < cmds.length; i++) {
-        const r = await execWithTimeout(cmds[i], 10000);
-        if (r.ok) {
-          resolve({ ok:true, path:certPath, scope: i===0 ? 'login keychain':'system keychain' });
-          return;
-        }
-        log.warn('cert:install attempt', i, r.error);
+      // 1. Pre-check: already trusted? (exit 0 = already good, skip re-install)
+      const check = await execWithTimeout(`security verify-cert -c "${certPath}"`, 5000);
+      if (check.ok) {
+        resolve({ ok:true, path:certPath, scope:'already trusted' });
+        return;
       }
-      resolve({ ok:false, path:certPath, error:'Install failed. Run manually:\nsudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "'+certPath+'"' });
+
+      // 2. osascript elevation — shows native macOS "enter password" dialog
+      const esc = certPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      const osa = `osascript -e 'do shell script "security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain \\"${esc}\\"" with administrator privileges'`;
+      const r = await execWithTimeout(osa, 60000); // 60s — user needs time to type password
+      if (r.ok) {
+        resolve({ ok:true, path:certPath, scope:'system keychain (elevated)' });
+        return;
+      }
+      log.warn('cert:install osascript failed:', r.error);
+
+      // 3. Login keychain fallback (no admin needed, works for current user)
+      const loginKC = path.join(app.getPath('home'), 'Library', 'Keychains', 'login.keychain-db');
+      const r2 = await execWithTimeout(`security add-trusted-cert -d -r trustRoot -k "${loginKC}" "${certPath}"`, 10000);
+      if (r2.ok) {
+        resolve({ ok:true, path:certPath, scope:'login keychain' });
+        return;
+      }
+      log.warn('cert:install login keychain failed:', r2.error);
+
+      // 4. Copy cert path to clipboard + surface manual command
+      try { require('child_process').execSync(`echo "${certPath}" | pbcopy`); } catch {}
+      const manualCmd = `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "${certPath}"`;
+      resolve({
+        ok: false, path: certPath,
+        error: `Automatic install failed. Cert path copied to clipboard.\n\nRun manually in Terminal:\n${manualCmd}`,
+        manualCmd,
+      });
       return;
     }
 

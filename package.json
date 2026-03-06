@@ -13,7 +13,11 @@
     "start": "concurrently \"npm run react\" \"wait-on http://localhost:3000 && sleep 1 && npm run electron-dev\"",
     "dist": "npm run build && electron-builder --mac",
     "dist:win": "npm run build && electron-builder --win",
-    "dist:all": "npm run build && electron-builder --mac --win"
+    "dist:all": "npm run build && electron-builder --mac --win",
+    "scan": "python3 backend/cli.py scan",
+    "train": "python3 backend/cli.py train",
+    "phantom": "python3 backend/cli.py",
+    "status": "python3 backend/cli.py status"
   },
   "build": {
     "extends": null,

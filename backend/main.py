@@ -33,6 +33,13 @@ from pydantic import BaseModel, Field
 
 from autopilot import run_autopilot_scan, inspect_dependencies
 
+# Model auto-detection — import with graceful fallback
+try:
+    from agents.base import detect_best_model as _detect_model
+except ImportError:
+    def _detect_model() -> str:
+        return "llama3.1"
+
 # ── Logging ─────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -179,6 +186,9 @@ async def lifespan(app: FastAPI):
     global _db
     _db = init_db()
     log.info(f"SQLite database opened: {DB_PATH}")
+    # Auto-detect best available Ollama model and cache on app.state
+    app.state.active_model = _detect_model()
+    log.info(f"Active LLM model: {app.state.active_model}")
     yield
     if _db:
         _db.close()
@@ -213,7 +223,7 @@ class ScanRequest(BaseModel):
     target:      str
     target_type: str        = "web"
     agents:      List[str]  = ["recon", "web", "network", "exploit"]
-    model:       str        = "llama3.1"
+    model:       str        = ""           # empty = auto-detect at runtime
     depth:       str        = "standard"   # quick | standard | deep
     max_iter:    int        = 10
 
@@ -729,6 +739,22 @@ async def get_models():
         return {"models": [], "error": str(e)}
 
 
+@app.get("/ollama/active-model")
+async def active_model():
+    """Return the currently detected best Ollama model."""
+    return {"model": getattr(app.state, "active_model", "llama3.1")}
+
+
+@app.get("/ollama/training-history")
+async def training_history():
+    """Return the last 10 training runs."""
+    rows = _db.execute(
+        "SELECT id, model_name, base_model, status, message, created_at "
+        "FROM ollama_training_runs ORDER BY created_at DESC LIMIT 10"
+    ).fetchall()
+    return {"runs": [dict(r) for r in rows]}
+
+
 def _parse_json_or(text: str, default):
     try:
         return json.loads(text or "")
@@ -947,6 +973,11 @@ async def autopilot_run(req: AutopilotRequest):
         for f in findings:
             counts[f["severity"]] = counts.get(f["severity"], 0) + 1
 
+        # Auto-train LLM if scan produced >= 3 verified findings
+        confirmed_count = sum(1 for f in findings if f.get("severity") in ("CRITICAL", "HIGH", "MEDIUM"))
+        if confirmed_count >= 3:
+            asyncio.create_task(_auto_train_background())
+
         return {
             "ok": True,
             "session_id": session_id,
@@ -992,8 +1023,10 @@ async def ollama_train(req: OllamaTrainRequest):
     os.makedirs(work_dir, exist_ok=True)
 
     max_findings = max(20, min(req.max_findings, 1000))
+    # Only use confirmed, tool-verified findings for training (confirmed=1 or legacy NULL)
     rows = _db.execute(
-        "SELECT severity, description, tool, agent, created_at FROM findings "
+        "SELECT severity, description, tool, agent, created_at, raw_output FROM findings "
+        "WHERE (confirmed=1 OR confirmed IS NULL) AND severity IN ('CRITICAL','HIGH','MEDIUM') "
         "ORDER BY created_at DESC LIMIT ?",
         (max_findings,),
     ).fetchall()
@@ -1021,29 +1054,25 @@ async def ollama_train(req: OllamaTrainRequest):
     dataset_path = os.path.join(work_dir, f"{run_id}.jsonl")
     modelfile_path = os.path.join(work_dir, f"{run_id}.Modelfile")
 
-    dataset_lines: List[str] = []
-    for f in findings[:400]:
-        sev = (f.get("severity") or "INFO").upper()
-        desc = f.get("description") or ""
-        tool = f.get("tool") or "tool"
-        agent = f.get("agent") or "agent"
-        prompt = (
-            "Analyze this pentest signal and return triage guidance.\n"
-            f"Severity: {sev}\nTool: {tool}\nAgent: {agent}\nFinding: {desc}\n"
-            "Required format: RISK, LIKELY_CAUSE, VERIFICATION, REMEDIATION."
-        )
-        response = (
-            f"RISK: {sev}\n"
-            f"LIKELY_CAUSE: {desc}\n"
-            "VERIFICATION: Reproduce with controlled requests and confirm impact.\n"
-            "REMEDIATION: Apply least-privilege, strict validation, and secure defaults."
-        )
-        dataset_lines.append(json.dumps({
-            "messages": [
-                {"role": "user", "content": prompt},
-                {"role": "assistant", "content": response},
-            ]
-        }, ensure_ascii=False))
+    # Use trainer.py's ACTION-format examples (teaches correct tool-call format)
+    try:
+        from trainer import build_training_examples
+        dataset_lines = build_training_examples(findings)
+        log.info(f"[ollama/train] trainer.py generated {len(dataset_lines)} examples")
+    except Exception as te:
+        log.warning(f"[ollama/train] trainer.py failed ({te}), falling back to legacy format")
+        dataset_lines = []
+        for f in findings[:400]:
+            sev  = (f.get("severity") or "INFO").upper()
+            desc = f.get("description") or ""
+            tool = f.get("tool") or "tool"
+            agent= f.get("agent") or "agent"
+            dataset_lines.append(json.dumps({
+                "messages": [
+                    {"role": "user",      "content": f"Analyze finding: [{sev}] {tool}: {desc[:120]}"},
+                    {"role": "assistant", "content": f"THOUGHT: {sev} finding from {tool}\nACTION: {tool}\nDONE: false"},
+                ]
+            }, ensure_ascii=False))
 
     with open(dataset_path, "w", encoding="utf-8") as f:
         for line in dataset_lines:
@@ -1130,6 +1159,184 @@ async def ollama_train(req: OllamaTrainRequest):
     }
 
 
+# ── Auto-training background task ─────────────────────────────────────
+
+async def _auto_train_background():
+    """
+    Fired automatically after a productive autopilot scan (>= 3 confirmed findings).
+    Waits 10s for DB to settle, then triggers Ollama training with real finding data.
+    Non-fatal — any error is logged and swallowed.
+    """
+    try:
+        await asyncio.sleep(10)
+        from trainer import build_training_examples, write_modelfile
+        import tempfile, pathlib
+
+        # Pull confirmed findings
+        rows = _db.execute(
+            "SELECT severity, description, tool, agent, raw_output FROM findings "
+            "WHERE (confirmed=1 OR confirmed IS NULL) AND severity IN ('CRITICAL','HIGH','MEDIUM') "
+            "ORDER BY created_at DESC LIMIT 300"
+        ).fetchall()
+        findings = [dict(r) for r in rows]
+
+        if not findings:
+            return
+
+        active_model_name = getattr(app.state, "active_model", "llama3.1")
+        examples = build_training_examples(findings)
+        if not examples:
+            return
+
+        # Write JSONL + Modelfile to temp dir
+        work_dir = pathlib.Path(os.path.dirname(__file__)) / "memory" / "ollama_training"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        run_id = str(uuid4())
+        jsonl_path = work_dir / f"{run_id}.jsonl"
+        jsonl_path.write_text("\n".join(examples) + "\n")
+        modelfile_path = write_modelfile(work_dir, active_model_name, jsonl_path)
+
+        # Run ollama create
+        import subprocess as _sp
+        proc = _sp.run(
+            ["ollama", "create", "phantom-security:latest", "-f", str(modelfile_path)],
+            capture_output=True, text=True, timeout=600
+        )
+        status = "success" if proc.returncode == 0 else "failed"
+        message = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()[:4000]
+
+        _db.execute(
+            "INSERT INTO ollama_training_runs "
+            "(id, model_name, base_model, status, message, dataset_path, modelfile_path, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (run_id, "phantom-security:latest", active_model_name, status, message,
+             str(jsonl_path), str(modelfile_path), datetime.utcnow().isoformat())
+        )
+        _db.commit()
+        log.info(f"[auto-train] Completed — status={status}, examples={len(examples)}")
+    except Exception as e:
+        log.warning(f"[auto-train] Failed (non-fatal): {e}")
+
+
+# ── Exploitation graph ─────────────────────────────────────────────────
+
+class GraphBuildRequest(BaseModel):
+    session_id: Optional[str]       = None
+    findings:   Optional[List[Dict]] = None
+    target:     Optional[str]        = None
+
+
+@app.post("/graph/build")
+async def graph_build(req: GraphBuildRequest):
+    """
+    Build a kill-chain exploitation graph from findings.
+    Pass either session_id (fetches from DB) or a findings list directly.
+    Returns nodes, edges, attack_paths and risk_score for the React GraphView.
+    """
+    from graph_builder import build_exploitation_graph
+
+    findings: List[Dict] = []
+    if req.findings:
+        findings = req.findings
+    elif req.session_id:
+        rows = _db.execute(
+            "SELECT id, severity, description, agent, tool, cvss, raw_output "
+            "FROM findings WHERE session_id=? ORDER BY cvss DESC",
+            (req.session_id,)
+        ).fetchall()
+        findings = [dict(r) for r in rows]
+    else:
+        # Default: all findings from last 7 days
+        rows = _db.execute(
+            "SELECT id, severity, description, agent, tool, cvss, raw_output "
+            "FROM findings WHERE created_at > datetime('now','-7 days') "
+            "ORDER BY cvss DESC LIMIT 500"
+        ).fetchall()
+        findings = [dict(r) for r in rows]
+
+    graph = build_exploitation_graph(findings, target=req.target)
+    return graph
+
+
+# ── Proxy traffic analysis ─────────────────────────────────────────────
+
+class ProxyAnalyzeRequest(BaseModel):
+    history:    List[Dict]          # proxy request/response objects
+    session_id: Optional[str] = None
+
+
+@app.post("/proxy/analyze")
+async def proxy_analyze(req: ProxyAnalyzeRequest):
+    """
+    Analyze captured proxy traffic for vulnerabilities.
+    Takes up to 50 flagged/recent requests and runs finding extraction.
+    Returns a list of findings + saves them to DB.
+    """
+    history = req.history[:50]
+    session_id = req.session_id or str(uuid4())
+    findings: List[Dict] = []
+    seen: set = set()
+
+    for entry in history:
+        # Combine URL + body + response into one text blob for pattern matching
+        url     = str(entry.get("url") or entry.get("path") or "")
+        method  = str(entry.get("method") or "GET")
+        body    = str(entry.get("body") or entry.get("requestBody") or "")
+        resp    = str(entry.get("response") or entry.get("responseBody") or "")
+        headers = str(entry.get("requestHeaders") or entry.get("headers") or "")
+        blob    = f"{method} {url}\n{headers}\n{body}\n{resp}"
+
+        # Check for vulnerability patterns
+        vuln_patterns = [
+            (r"OR\s+\d+=\d+|UNION\s+SELECT|sleep\s*\(",               "CRITICAL", "SQL Injection pattern in proxy traffic"),
+            (r"<script[\s>]|javascript:|onerror\s*=",                  "HIGH",     "XSS payload in proxy traffic"),
+            (r"\.\./|file://|php://",                                  "HIGH",     "Path traversal / LFI in proxy traffic"),
+            (r"\$\{|#\{|\{\{",                                         "CRITICAL", "SSTI payload in proxy traffic"),
+            (r"AKIA[0-9A-Z]{16}",                                      "CRITICAL", "AWS key exposed in proxy traffic"),
+            (r"Bearer\s+[A-Za-z0-9\-_.]{20,}",                        "HIGH",     "JWT token in proxy traffic"),
+            (r"api[_\-]?key\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{16,}",     "HIGH",     "API key in proxy traffic"),
+            (r"password\s*[:=]\s*['\"]?\S{4,}",                       "MEDIUM",   "Password in proxy traffic"),
+        ]
+
+        for pattern, sev, desc in vuln_patterns:
+            if re.search(pattern, blob, re.I):
+                key = f"{sev}|{desc}|{url[:60]}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                finding = {
+                    "id":          str(uuid4()),
+                    "session_id":  session_id,
+                    "severity":    sev,
+                    "description": f"{desc} — {url[:100]}",
+                    "agent":       "proxy",
+                    "tool":        "proxy-analyzer",
+                    "iteration":   0,
+                    "cvss":        DEFAULT_CVSS.get(sev, 1.0),
+                    "raw_output":  blob[:400],
+                    "confirmed":   1,
+                    "created_at":  datetime.utcnow().isoformat(),
+                }
+                findings.append(finding)
+                _db.execute(
+                    "INSERT OR IGNORE INTO findings "
+                    "(id, session_id, severity, description, agent, tool, iteration, cvss, raw_output, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (finding["id"], finding["session_id"], finding["severity"],
+                     finding["description"], finding["agent"], finding["tool"],
+                     finding["iteration"], finding["cvss"], finding["raw_output"],
+                     finding["created_at"])
+                )
+
+    _db.commit()
+    return {
+        "ok":       True,
+        "findings": findings,
+        "analyzed": len(history),
+        "flagged":  len(findings),
+    }
+
+
 # ════════════════════════════════════════════════════════════════════
 #  WEBSOCKET — AGENT STREAMING
 #  This is the heart of the real-time UI experience. The renderer
@@ -1155,7 +1362,7 @@ async def agent_ws(ws: WebSocket):
 
         target      = config.get("target",   "localhost")
         target_type = config.get("type",     "web")
-        model       = config.get("model",    "llama3.1")
+        model       = config.get("model",    "") or getattr(app.state, "active_model", "llama3.1")
         depth       = config.get("depth",    "standard")
         max_iter    = int(config.get("max_iter", 10))
         agents_req  = config.get("agents",   ["planner","recon","web","network","exploit"])
