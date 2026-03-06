@@ -1,0 +1,100 @@
+###############################################################################
+#  PHANTOM AI v3 — Data Layer Services
+#  Starts: Redis · Neo4j · Chroma · PostgreSQL
+#
+#  Usage:
+#    docker-compose up -d            # start all services in background
+#    docker-compose ps               # check health
+#    docker-compose down             # stop and remove containers
+#    docker-compose down -v          # also wipe all volumes (full reset)
+###############################################################################
+
+version: "3.9"
+
+services:
+
+  # ── Redis (short-term state, agent queues, rate limiting) ─────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: phantom_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Neo4j (attack graph — privilege paths, lateral movement) ─────────────
+  neo4j:
+    image: neo4j:5-community
+    container_name: phantom_neo4j
+    restart: unless-stopped
+    ports:
+      - "7474:7474"   # Browser UI
+      - "7687:7687"   # Bolt protocol (used by the Python backend)
+    environment:
+      NEO4J_AUTH: neo4j/phantom123
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+      NEO4J_dbms_memory_heap_initial__size: 256m
+      NEO4J_dbms_memory_heap_max__size: 512m
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+
+  # ── Chroma (vector DB — semantic memory, embedding-based pattern search) ──
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: phantom_chroma
+    restart: unless-stopped
+    ports:
+      - "8010:8000"   # Chroma HTTP API (mapped to 8010 to avoid FastAPI clash)
+    environment:
+      CHROMA_SERVER_HOST: 0.0.0.0
+      CHROMA_SERVER_HTTP_PORT: 8000
+      ANONYMIZED_TELEMETRY: "False"
+    volumes:
+      - chroma_data:/chroma/chroma
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v1/heartbeat || exit 1"]
+      interval: 15s
+      timeout: 8s
+      retries: 5
+
+  # ── PostgreSQL (persistent findings, sessions, agent history) ─────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: phantom_postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB:       phantom
+      POSTGRES_USER:     phantom
+      POSTGRES_PASSWORD: phantom
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U phantom -d phantom"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+# ── Named volumes (data persists across container restarts) ───────────────
+volumes:
+  redis_data:
+  neo4j_data:
+  neo4j_logs:
+  chroma_data:
+  postgres_data:

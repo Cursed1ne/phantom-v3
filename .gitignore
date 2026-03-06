@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+
+# Build output
+build/
+dist/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+*.egg-info/
+
+# Database & user data
+*.db
+*.sqlite
+*.sqlite3
+phantom.db
+
+# Certs (generated at runtime)
+certs/
+*.key
+*.crt
+*.pem
+
+# Electron packaged
+*.dmg
+*.exe
+*.AppImage
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+electron-log*
+
+# IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Claude plans
+.claude/plans/

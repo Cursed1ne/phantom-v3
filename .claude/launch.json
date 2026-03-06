@@ -1,0 +1,24 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "React UI",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "react"],
+      "port": 3000
+    },
+    {
+      "name": "FastAPI Backend",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["backend/main.py"],
+      "port": 8000
+    },
+    {
+      "name": "Phantom (React + Electron)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["start"],
+      "port": 3000,
+      "autoPort": false
+    }
+  ]
+}

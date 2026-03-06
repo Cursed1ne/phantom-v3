@@ -1,0 +1,384 @@
+/* ╔═══════════════════════════════════════════════════════════════╗
+   ║  PHANTOM AI v3 — Design System                               ║
+   ║  Dark cyberpunk · Orange/Red accent · JetBrains Mono         ║
+   ╚═══════════════════════════════════════════════════════════════╝ */
+
+/* ── CSS Variables ─────────────────────────────────────────────── */
+:root {
+  /* Background layers */
+  --bg-base:      #0a0a0f;
+  --bg-surface:   #0f0f1a;
+  --bg-card:      #13131f;
+  --bg-hover:     #1a1a28;
+  --bg-active:    #1e1e30;
+
+  /* Borders */
+  --border:       #1e1e30;
+  --border-dim:   #141420;
+  --border-glow:  rgba(255,69,0,0.2);
+
+  /* Brand accents */
+  --orange:       #ff4500;
+  --orange-dim:   #cc3700;
+  --orange-glow:  rgba(255,69,0,0.12);
+  --orange-text:  #ff6030;
+  --red:          #dc2626;
+  --yellow:       #f59e0b;
+  --green:        #10b981;
+  --blue:         #3b82f6;
+  --purple:       #8b5cf6;
+  --cyan:         #06b6d4;
+  --pink:         #ec4899;
+
+  /* Severity colours */
+  --sev-crit-bg:  #1a0505;
+  --sev-crit-fg:  #f87171;
+  --sev-crit-bd:  #7f1d1d;
+  --sev-high-bg:  #1a0d05;
+  --sev-high-fg:  #fb923c;
+  --sev-high-bd:  #7c2d12;
+  --sev-med-bg:   #1a1505;
+  --sev-med-fg:   #fbbf24;
+  --sev-med-bd:   #713f12;
+  --sev-low-bg:   #051a0d;
+  --sev-low-fg:   #34d399;
+  --sev-low-bd:   #064e3b;
+  --sev-info-bg:  #050f1a;
+  --sev-info-fg:  #60a5fa;
+  --sev-info-bd:  #1e3a5f;
+
+  /* Typography */
+  --font-sans:    'Inter', system-ui, sans-serif;
+  --font-mono:    'JetBrains Mono', 'Fira Code', monospace;
+  --font-display: 'Orbitron', 'SF Mono', monospace;
+
+  /* Radii & shadows */
+  --radius:       8px;
+  --radius-lg:    12px;
+  --radius-xl:    16px;
+  --shadow:       0 4px 24px rgba(0,0,0,0.5);
+  --shadow-glow:  0 0 24px rgba(255,69,0,0.18);
+}
+
+/* ── Reset ──────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-base);
+  color: #e8e8f0;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Scrollbars ─────────────────────────────────────────────────── */
+::-webkit-scrollbar              { width: 4px; height: 4px; }
+::-webkit-scrollbar-track        { background: transparent; }
+::-webkit-scrollbar-thumb        { background: rgba(255,69,0,0.3); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover  { background: rgba(255,69,0,0.6); }
+
+/* ── Selection & Focus ──────────────────────────────────────────── */
+::selection   { background: rgba(255,69,0,0.25); color: #ff8060; }
+:focus-visible { outline: 1.5px solid var(--orange); outline-offset: 1px; }
+
+/* ── Animations ─────────────────────────────────────────────────── */
+@keyframes fadeUp     { from { opacity:0; transform:translateY(10px) } to { opacity:1; transform:translateY(0) } }
+@keyframes fadeIn     { from { opacity:0 } to { opacity:1 } }
+@keyframes spin       { to   { transform:rotate(360deg) } }
+@keyframes pulse      { 0%,100%{opacity:1} 50%{opacity:0.15} }
+@keyframes blink      { 0%,100%{opacity:1} 50%{opacity:0} }
+@keyframes glow-pulse { 0%,100%{box-shadow:0 0 8px rgba(255,69,0,0.3)} 50%{box-shadow:0 0 22px rgba(255,69,0,0.7)} }
+@keyframes shimmer    { from{background-position:-200% 0} to{background-position:200% 0} }
+@keyframes slideIn    { from{transform:translateX(-8px);opacity:0} to{transform:translateX(0);opacity:1} }
+@keyframes countUp    { from{opacity:0;transform:scale(0.7)} to{opacity:1;transform:scale(1)} }
+
+/* Utility animation classes */
+.anim-fadeup  { animation: fadeUp   0.25s ease forwards; }
+.anim-fadein  { animation: fadeIn   0.2s  ease forwards; }
+.anim-spin    { animation: spin     1s    linear infinite; }
+.anim-pulse   { animation: pulse   1.4s  ease   infinite; }
+.anim-blink   { animation: blink    0.8s  step-end infinite; }
+.anim-glow    { animation: glow-pulse 2s  ease   infinite; }
+.anim-shimmer {
+  background: linear-gradient(90deg, var(--bg-card) 25%, var(--bg-hover) 50%, var(--bg-card) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s linear infinite;
+}
+
+/* Cursor blink for streaming LLM text */
+.stream-cursor::after {
+  content: '▊';
+  color: var(--orange);
+  animation: blink 0.7s step-end infinite;
+  margin-left: 2px;
+}
+
+/* ── Typography helpers ─────────────────────────────────────────── */
+.font-display { font-family: var(--font-display) !important; }
+.font-mono    { font-family: var(--font-mono)    !important; }
+.font-sans    { font-family: var(--font-sans)    !important; }
+
+/* ── Base elements ──────────────────────────────────────────────── */
+button {
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: all 0.15s ease;
+  user-select: none;
+}
+button:active:not(:disabled) { transform: scale(0.96); }
+button:disabled { opacity: 0.4; cursor: not-allowed; transform: none !important; }
+
+input, select, textarea {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: #e8e8f0;
+  font-family: var(--font-sans);
+  border-radius: var(--radius);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--orange);
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(255,69,0,0.12);
+}
+input::placeholder, textarea::placeholder { color: #44445a; }
+
+/* ── Severity badge component ───────────────────────────────────── */
+/* Usage: <span class="sev-badge sev-CRITICAL">CRITICAL</span>      */
+.sev-badge {
+  display:        inline-flex;
+  align-items:    center;
+  font-family:    var(--font-mono);
+  font-size:      9px;
+  font-weight:    700;
+  letter-spacing: 1.5px;
+  padding:        2px 7px;
+  border-radius:  4px;
+  border:         1px solid;
+  text-transform: uppercase;
+  white-space:    nowrap;
+}
+.sev-CRITICAL { background: var(--sev-crit-bg); color: var(--sev-crit-fg); border-color: var(--sev-crit-bd); }
+.sev-HIGH     { background: var(--sev-high-bg); color: var(--sev-high-fg); border-color: var(--sev-high-bd); }
+.sev-MEDIUM   { background: var(--sev-med-bg);  color: var(--sev-med-fg);  border-color: var(--sev-med-bd);  }
+.sev-LOW      { background: var(--sev-low-bg);  color: var(--sev-low-fg);  border-color: var(--sev-low-bd);  }
+.sev-INFO     { background: var(--sev-info-bg); color: var(--sev-info-fg); border-color: var(--sev-info-bd); }
+
+/* ── Card component ─────────────────────────────────────────────── */
+.card {
+  background:    var(--bg-card);
+  border:        1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow:      hidden;
+}
+.card-header {
+  padding:        10px 14px;
+  border-bottom:  1px solid var(--border);
+  font-family:    var(--font-mono);
+  font-size:      9px;
+  font-weight:    700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color:          #888;
+  display:        flex;
+  align-items:    center;
+  gap:            8px;
+  flex-shrink:    0;
+}
+
+/* ── Terminal output ─────────────────────────────────────────────── */
+.terminal {
+  background:   #050508;
+  border:       1px solid #1a1a28;
+  border-radius: var(--radius);
+  padding:      12px 14px;
+  font-family:  var(--font-mono);
+  font-size:    12px;
+  line-height:  1.85;
+  color:        #9090b0;
+  overflow-y:   auto;
+  white-space:  pre-wrap;
+  word-break:   break-all;
+}
+/* Coloured text inside terminal blocks */
+.terminal .t-orange { color: var(--orange); }
+.terminal .t-red    { color: #f87171; }
+.terminal .t-green  { color: #34d399; }
+.terminal .t-blue   { color: #60a5fa; }
+.terminal .t-dim    { color: #44445a; }
+.terminal .t-yellow { color: #fbbf24; }
+
+/* ── Agent status colour helpers ─────────────────────────────────── */
+.agent-idle     { color: #44445a; }
+.agent-thinking { color: #8b5cf6; }
+.agent-running  { color: #f59e0b; }
+.agent-complete { color: #10b981; }
+.agent-error    { color: #ef4444; }
+
+/* ── Subtle dot-grid background texture ──────────────────────────── */
+.dot-grid {
+  background-image:    radial-gradient(rgba(255,69,0,0.06) 1px, transparent 1px);
+  background-size:     24px 24px;
+  background-position: 0 0;
+}
+
+/* ── Scan line overlay ───────────────────────────────────────────── */
+.scanlines::before {
+  content:          '';
+  position:         absolute;
+  inset:            0;
+  background:       repeating-linear-gradient(
+                      0deg,
+                      transparent,
+                      transparent 3px,
+                      rgba(0,0,0,0.04) 3px,
+                      rgba(0,0,0,0.04) 4px
+                    );
+  pointer-events:   none;
+  z-index:          1;
+}
+
+/* ── Progress bar ─────────────────────────────────────────────────── */
+.progress-track {
+  height:        3px;
+  background:    var(--bg-active);
+  border-radius: 2px;
+  overflow:      hidden;
+}
+.progress-fill {
+  height:        100%;
+  border-radius: 2px;
+  background:    linear-gradient(90deg, var(--orange-dim), var(--orange));
+  box-shadow:    0 0 6px rgba(255,69,0,0.5);
+  transition:    width 0.4s ease;
+}
+
+/* ── Nav button active state ─────────────────────────────────────── */
+.nav-btn {
+  width: 48px; height: 48px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 2px; position: relative;
+  color: #44445a;
+  transition: all 0.15s ease;
+}
+.nav-btn:hover  { background: rgba(255,69,0,0.06); color: #888; }
+.nav-btn.active { background: rgba(255,69,0,0.1); border-color: rgba(255,69,0,0.3); color: var(--orange); }
+.nav-btn .nav-icon  { font-size: 16px; line-height: 1; }
+.nav-btn .nav-label { font-size: 5.5px; font-family: var(--font-mono); letter-spacing: 0.5px; text-transform: uppercase; }
+
+/* Badge on nav button */
+.nav-badge {
+  position: absolute; top: 2px; right: 2px;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--orange);
+  color: white;
+  font-size: 7px;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700;
+  font-family: var(--font-mono);
+}
+
+/* ── Stat card component ─────────────────────────────────────────── */
+.stat-card {
+  background:    var(--bg-card);
+  border:        1px solid var(--border);
+  border-top:    2px solid var(--card-accent, var(--orange));
+  border-radius: var(--radius-lg);
+  padding:       14px 16px;
+}
+.stat-number {
+  font-family: var(--font-display);
+  font-size:   34px;
+  font-weight: 900;
+  line-height: 1;
+  color:       var(--card-accent, var(--orange));
+  animation:   countUp 0.4s ease;
+}
+.stat-label {
+  font-size:      9px;
+  letter-spacing: 2px;
+  color:          #666;
+  font-family:    var(--font-mono);
+  margin-top:     4px;
+  text-transform: uppercase;
+}
+
+/* ── Table ──────────────────────────────────────────────────────── */
+.data-table {
+  width:           100%;
+  border-collapse: collapse;
+  font-size:       12px;
+}
+.data-table th {
+  background:     var(--bg-surface);
+  padding:        8px 13px;
+  text-align:     left;
+  font-family:    var(--font-mono);
+  font-size:      8px;
+  letter-spacing: 2px;
+  color:          #666;
+  font-weight:    700;
+  border-bottom:  1px solid var(--border);
+  text-transform: uppercase;
+}
+.data-table td {
+  padding:       9px 13px;
+  border-bottom: 1px solid var(--border-dim);
+  color:         #c8c8e0;
+}
+.data-table tr:hover td { background: var(--bg-surface); }
+
+/* ── Code / payload chip ─────────────────────────────────────────── */
+.payload-chip {
+  display:       block;
+  font-family:   var(--font-mono);
+  font-size:     11px;
+  color:         #f87171;
+  background:    var(--sev-crit-bg);
+  border:        1px solid rgba(127,29,29,0.4);
+  border-radius: 5px;
+  padding:       4px 9px;
+  margin-bottom: 3px;
+  cursor:        pointer;
+  overflow:      hidden;
+  text-overflow: ellipsis;
+  white-space:   nowrap;
+  transition:    background 0.1s;
+}
+.payload-chip:hover { background: rgba(220,38,38,0.12); }
+
+/* ── Graph canvas background ─────────────────────────────────────── */
+.graph-canvas {
+  background: #050508;
+  background-image:
+    radial-gradient(rgba(255,69,0,0.04) 1px, transparent 1px),
+    radial-gradient(rgba(59,130,246,0.03) 1px, transparent 1px);
+  background-size: 30px 30px, 60px 60px;
+  background-position: 0 0, 15px 15px;
+}
+
+/* ── Divider ──────────────────────────────────────────────────────── */
+.divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
+}
+
+/* ── Tooltip ──────────────────────────────────────────────────────── */
+.recharts-tooltip-wrapper .recharts-default-tooltip {
+  background:    var(--bg-card)  !important;
+  border:        1px solid var(--border) !important;
+  border-radius: var(--radius)    !important;
+  font-family:   var(--font-mono) !important;
+  font-size:     11px             !important;
+  box-shadow:    var(--shadow)    !important;
+}
