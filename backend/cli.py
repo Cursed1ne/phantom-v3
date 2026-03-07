@@ -36,7 +36,7 @@ import websockets
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 BACKEND_URL = os.environ.get("PHANTOM_BACKEND", "http://localhost:8000")
-WS_URL      = os.environ.get("PHANTOM_WS",      "ws://localhost:8001")
+WS_URL      = os.environ.get("PHANTOM_WS",      "ws://localhost:8000")
 DEFAULT_OUT = Path("./reports")
 
 # ── Color helpers (ANSI, skipped if not a TTY) ────────────────────────────────

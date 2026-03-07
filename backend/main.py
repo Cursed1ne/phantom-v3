@@ -1419,6 +1419,111 @@ async def agent_ws(ws: WebSocket):
         manager.disconnect(ws)
 
 
+# ════════════════════════════════════════════════════════════════════
+#  CHAT WebSocket — ChatGPT-style conversational AI interface
+#  Stream URL: ws://localhost:8000/ws/chat
+#  Client sends: {"message": "scan https://target.com"}
+#  Server yields: {"type": "token"|"text"|"finding"|"scan_start"|"done", ...}
+# ════════════════════════════════════════════════════════════════════
+
+@app.websocket("/ws/chat")
+async def chat_ws(ws: WebSocket):
+    """
+    Conversational AI interface. One connection = one chat session.
+    PhantomChatAgent detects intent from natural language and dispatches
+    to the appropriate platform function (scan, train, graph, report, etc.)
+    or streams a direct LLM answer for security questions.
+    """
+    try:
+        from chat_agent import PhantomChatAgent
+    except ImportError as e:
+        log.error(f"chat_agent import failed: {e}")
+        return
+
+    await manager.connect(ws)
+    model = getattr(app.state, "active_model", "llama3.1")
+    agent = PhantomChatAgent(model=model, db=_db)
+
+    # Send welcome banner
+    await ws.send_json({
+        "type": "text",
+        "text": (
+            "**Phantom AI** — conversational pentest assistant\n\n"
+            "Try:\n"
+            "- `scan https://pentest-ground.com:4280/`\n"
+            "- `show vulnerabilities`\n"
+            "- `build exploit graph`\n"
+            "- `model status`\n"
+            "- *or ask any security question*"
+        ),
+    })
+    await ws.send_json({"type": "done"})
+
+    try:
+        while True:
+            raw      = await ws.receive_text()
+            data     = json.loads(raw)
+            user_msg = data.get("message", "").strip()
+            if not user_msg:
+                continue
+            backend_url = f"http://localhost:{PORT}"
+            async for event in agent.process(user_msg, backend_url):
+                await ws.send_json(event)
+            await ws.send_json({"type": "done"})
+    except WebSocketDisconnect:
+        log.info("Chat WS client disconnected")
+    except Exception as e:
+        log.error(f"Chat WS error: {e}", exc_info=True)
+    finally:
+        manager.disconnect(ws)
+
+
+class ChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+
+
+@app.post("/chat")
+async def chat_post(req: ChatRequest):
+    """
+    Non-streaming chat endpoint for simple integrations (CLI, scripts).
+    Returns the full response after processing.
+    """
+    try:
+        from chat_agent import PhantomChatAgent
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"chat_agent import failed: {e}")
+
+    model = getattr(app.state, "active_model", "llama3.1")
+    agent = PhantomChatAgent(model=model, db=_db)
+    if req.session_id:
+        agent.ctx["session_id"] = req.session_id
+
+    events: list = []
+    async for ev in agent.process(req.message, f"http://localhost:{PORT}"):
+        events.append(ev)
+
+    # Collapse tokens into text blocks
+    full_text = ""
+    findings  = []
+    other     = []
+    for ev in events:
+        if ev["type"] == "token":
+            full_text += ev.get("text", "")
+        elif ev["type"] == "text":
+            full_text += ev.get("text", "")
+        elif ev["type"] == "finding":
+            findings.append(ev)
+        else:
+            other.append(ev)
+
+    return JSONResponse({
+        "response": full_text,
+        "findings": findings,
+        "events":   other,
+    })
+
+
 # ── Per-agent loop ─────────────────────────────────────────────────────
 
 async def run_agent_loop(

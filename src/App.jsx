@@ -11,7 +11,7 @@ import {
 const E            = window.phantom || null;
 const IS_ELECTRON  = !!E?.isElectron;
 const BACKEND      = `http://localhost:${E?.BACKEND_PORT || 8000}`;
-const WS_URL       = `ws://localhost:${E?.WS_PORT       || 8001}`;
+const WS_URL       = `ws://localhost:${E?.WS_PORT       || 8000}`;
 
 // Unified API — uses Electron IPC when available, REST otherwise
 const API = {
@@ -484,6 +484,7 @@ function GhostBtn({ children, onClick, disabled, color = '#666', style = {} }) {
 // Navigation items
 const NAV = [
   { id: 'dashboard', icon: '◈',  label: 'Dash'    },
+  { id: 'chat',      icon: '💬', label: 'AI Chat' },
   { id: 'targets',   icon: '🎯', label: 'Targets' },
   { id: 'agents',    icon: '⬡',  label: 'Agents'  },
   { id: 'autopilot', icon: '🕷', label: 'Auto'    },
@@ -3727,6 +3728,411 @@ function SettingsView({ ollamaOk, models, model, setModel, onCheck }) {
   );
 }
 // ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  PHANTOM AI v3 — ChatView: ChatGPT-style conversational AI             ║
+// ║  Prompts control the whole platform: scan, analyze, report, train      ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+// Severity badge colors (same palette as rest of app)
+const CHAT_SEV_COLORS = {
+  CRITICAL: { bg: '#ef444420', border: '#ef444440', text: '#f87171' },
+  HIGH:     { bg: '#fb923c20', border: '#fb923c40', text: '#fb923c' },
+  MEDIUM:   { bg: '#fbbf2420', border: '#fbbf2440', text: '#fbbf24' },
+  LOW:      { bg: '#34d39920', border: '#34d39940', text: '#34d399' },
+  INFO:     { bg: '#3b82f620', border: '#3b82f640', text: '#60a5fa' },
+};
+
+// Markdown-lite renderer: **bold**, `code`, \n → <br>, URLs → links
+function renderChatText(text) {
+  if (!text) return null;
+  const parts = [];
+  let key = 0;
+  // Split on patterns we care about
+  const segments = text.split(/(\*\*[^*]+\*\*|`[^`]+`|https?:\/\/[^\s,;)]+|\n)/g);
+  for (const seg of segments) {
+    if (!seg) continue;
+    if (seg === '\n') {
+      parts.push(<br key={key++} />);
+    } else if (seg.startsWith('**') && seg.endsWith('**')) {
+      parts.push(<strong key={key++} style={{ color: '#e2e8f0' }}>{seg.slice(2, -2)}</strong>);
+    } else if (seg.startsWith('`') && seg.endsWith('`') && seg.length > 2) {
+      parts.push(
+        <code key={key++} style={{
+          background: '#1a1a2e', border: '1px solid #2d2d4a',
+          borderRadius: 4, padding: '1px 6px', fontFamily: 'var(--font-mono)',
+          fontSize: 11, color: '#a78bfa',
+        }}>{seg.slice(1, -1)}</code>
+      );
+    } else if (/^https?:\/\//.test(seg)) {
+      parts.push(
+        <a key={key++} href={seg} target="_blank" rel="noreferrer"
+          style={{ color: '#60a5fa', textDecoration: 'underline' }}>{seg}</a>
+      );
+    } else {
+      parts.push(<span key={key++}>{seg}</span>);
+    }
+  }
+  return parts;
+}
+
+function ChatFindingCard({ severity, description, tool, cvss }) {
+  const c = CHAT_SEV_COLORS[severity] || CHAT_SEV_COLORS.INFO;
+  return (
+    <div style={{
+      margin: '4px 0', padding: '6px 10px', borderRadius: 6,
+      background: c.bg, border: `1px solid ${c.border}`,
+      display: 'flex', gap: 8, alignItems: 'flex-start',
+    }}>
+      <span style={{
+        padding: '1px 6px', borderRadius: 3, fontSize: 9, fontWeight: 700,
+        fontFamily: 'var(--font-mono)', letterSpacing: 1,
+        background: c.border, color: c.text, flexShrink: 0, marginTop: 2,
+      }}>{severity}</span>
+      <div style={{ flex: 1, fontSize: 11, color: '#cbd5e1', lineHeight: 1.5 }}>
+        {description}
+      </div>
+      {tool && (
+        <span style={{
+          fontSize: 9, fontFamily: 'var(--font-mono)', color: '#555',
+          flexShrink: 0, marginTop: 3,
+        }}>{tool}{cvss ? ` · ${cvss}` : ''}</span>
+      )}
+    </div>
+  );
+}
+
+function ChatMessage({ msg }) {
+  const isUser = msg.role === 'user';
+  return (
+    <div style={{
+      display: 'flex', flexDirection: isUser ? 'row-reverse' : 'row',
+      alignItems: 'flex-start', gap: 8, marginBottom: 16,
+    }}>
+      {/* Avatar */}
+      <div style={{
+        width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
+        background: isUser
+          ? 'linear-gradient(135deg,#7c3aed,#5b21b6)'
+          : 'linear-gradient(135deg,#cc3700,#ff4500)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 12, marginTop: 2,
+        boxShadow: isUser ? '0 0 8px rgba(124,58,237,0.3)' : '0 0 8px rgba(255,69,0,0.3)',
+      }}>
+        {isUser ? '👤' : '🤖'}
+      </div>
+
+      {/* Bubble */}
+      <div style={{
+        maxWidth: '82%',
+        background: isUser ? '#1e1040' : '#0f0f1a',
+        border: `1px solid ${isUser ? '#7c3aed40' : '#1e1e30'}`,
+        borderRadius: isUser ? '12px 4px 12px 12px' : '4px 12px 12px 12px',
+        padding: '10px 14px',
+        fontSize: 12.5, lineHeight: 1.7, color: '#cbd5e1',
+      }}>
+        {/* Content blocks */}
+        {(msg.blocks || []).map((block, i) => {
+          if (block.type === 'text' || block.type === 'token') {
+            return <span key={i}>{renderChatText(block.text)}</span>;
+          }
+          if (block.type === 'finding') {
+            return <ChatFindingCard key={i} {...block} />;
+          }
+          if (block.type === 'scan_start') {
+            return (
+              <div key={i} style={{
+                margin: '6px 0', padding: '6px 10px', borderRadius: 6,
+                background: '#10b98115', border: '1px solid #10b98130',
+                fontFamily: 'var(--font-mono)', fontSize: 10, color: '#10b981',
+              }}>
+                ✓ Scan started · Session <span style={{ color: '#a78bfa' }}>{block.session_id?.slice(0, 8)}…</span>
+              </div>
+            );
+          }
+          return null;
+        })}
+        {/* Timestamp */}
+        <div style={{ fontSize: 9, color: '#33334a', marginTop: 4, textAlign: isUser ? 'right' : 'left' }}>
+          {msg.ts}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ChatThinkingBubble() {
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 16 }}>
+      <div style={{
+        width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
+        background: 'linear-gradient(135deg,#cc3700,#ff4500)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12,
+        boxShadow: '0 0 8px rgba(255,69,0,0.3)',
+      }}>🤖</div>
+      <div style={{
+        background: '#0f0f1a', border: '1px solid #1e1e30',
+        borderRadius: '4px 12px 12px 12px', padding: '10px 18px',
+        display: 'flex', gap: 5, alignItems: 'center',
+      }}>
+        {[0, 1, 2].map(i => (
+          <div key={i} style={{
+            width: 6, height: 6, borderRadius: '50%', background: '#ff4500',
+            animation: `chatPulse 1.2s ease-in-out ${i * 0.2}s infinite`,
+          }} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const CHAT_SUGGESTIONS = [
+  'scan https://pentest-ground.com:4280/',
+  'show vulnerabilities',
+  'build exploit graph',
+  'model status',
+  'what is SQL injection?',
+];
+
+function ChatView({ activeModel }) {
+  const [messages,  setMessages]  = useState([]);
+  const [input,     setInput]     = useState('');
+  const [isTyping,  setIsTyping]  = useState(false);
+  const [connected, setConnected] = useState(false);
+  const wsRef     = useRef(null);
+  const bottomRef = useRef(null);
+  const inputRef  = useRef(null);
+
+  // -- Helpers --
+  const now = () => new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+
+  const scrollBottom = () =>
+    setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 30);
+
+  // Append a block to the last AI message (for streaming)
+  const appendBlock = (block) => {
+    setMessages(prev => {
+      const msgs = [...prev];
+      const last = msgs[msgs.length - 1];
+      if (last && last.role === 'assistant') {
+        // If it's a token, merge into last text block
+        if (block.type === 'token') {
+          const blocks = [...last.blocks];
+          const lb = blocks[blocks.length - 1];
+          if (lb && lb.type === 'token') {
+            blocks[blocks.length - 1] = { ...lb, text: lb.text + block.text };
+          } else {
+            blocks.push({ type: 'token', text: block.text });
+          }
+          msgs[msgs.length - 1] = { ...last, blocks };
+        } else {
+          msgs[msgs.length - 1] = { ...last, blocks: [...last.blocks, block] };
+        }
+        return msgs;
+      }
+      return prev;
+    });
+    scrollBottom();
+  };
+
+  // -- WebSocket setup --
+  useEffect(() => {
+    const CHAT_WS = `ws://localhost:${window.phantom?.BACKEND_PORT || 8000}/ws/chat`;
+    const ws = new WebSocket(CHAT_WS);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      setConnected(true);
+    };
+
+    ws.onclose = () => {
+      setConnected(false);
+    };
+
+    ws.onerror = () => {
+      setConnected(false);
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        blocks: [{ type: 'text', text: '⚠ Cannot connect to Phantom backend. Make sure the backend is running on port 8000.' }],
+        ts: now(),
+      }]);
+    };
+
+    ws.onmessage = ({ data }) => {
+      try {
+        const ev = JSON.parse(data);
+        if (ev.type === 'done') {
+          setIsTyping(false);
+          // Finalise the streaming message timestamp
+          setMessages(prev => {
+            const msgs = [...prev];
+            if (msgs[msgs.length - 1]?.role === 'assistant') {
+              msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], ts: now() };
+            }
+            return msgs;
+          });
+          return;
+        }
+        // First event of a new AI response — create the message shell
+        setMessages(prev => {
+          const last = prev[prev.length - 1];
+          if (!last || last.role === 'user') {
+            return [...prev, { role: 'assistant', blocks: [], ts: '' }];
+          }
+          return prev;
+        });
+        appendBlock(ev);
+      } catch (_) {}
+    };
+
+    return () => ws.close();
+  }, []);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  // -- Send --
+  const sendMessage = (text) => {
+    const msg = (text || input).trim();
+    if (!msg || isTyping) return;
+    setInput('');
+
+    // Add user message
+    setMessages(prev => [...prev, {
+      role: 'user',
+      blocks: [{ type: 'text', text: msg }],
+      ts: now(),
+    }]);
+    setIsTyping(true);
+    scrollBottom();
+
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ message: msg }));
+    } else {
+      setIsTyping(false);
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        blocks: [{ type: 'text', text: '⚠ Not connected. Refresh to reconnect.' }],
+        ts: now(),
+      }]);
+    }
+  };
+
+  const handleKey = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#07070e' }}>
+      {/* Keyframe for thinking dots */}
+      <style>{`
+        @keyframes chatPulse {
+          0%,80%,100% { opacity: 0.2; transform: scale(0.8); }
+          40% { opacity: 1; transform: scale(1); }
+        }
+      `}</style>
+
+      {/* Header */}
+      <div style={{
+        padding: '12px 16px', background: '#08080f',
+        borderBottom: '1px solid #1e1e30', flexShrink: 0,
+        display: 'flex', alignItems: 'center', gap: 10,
+      }}>
+        <div style={{ fontSize: 20 }}>💬</div>
+        <div>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: '#ff4500', letterSpacing: 2 }}>
+            PHANTOM AI CHAT
+          </div>
+          <div style={{ fontSize: 9, color: '#33334a', fontFamily: 'var(--font-mono)' }}>
+            Natural-language pentest control · Model: {activeModel || 'auto'}
+          </div>
+        </div>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{
+            width: 7, height: 7, borderRadius: '50%',
+            background: connected ? '#10b981' : '#ef4444',
+            boxShadow: connected ? '0 0 6px #10b981' : 'none',
+          }} />
+          <span style={{ fontSize: 9, fontFamily: 'var(--font-mono)', color: connected ? '#10b981' : '#ef4444' }}>
+            {connected ? 'CONNECTED' : 'OFFLINE'}
+          </span>
+        </div>
+      </div>
+
+      {/* Messages */}
+      <div style={{ flex: 1, overflow: 'auto', padding: '16px 20px' }}>
+        {messages.length === 0 && (
+          <div style={{ textAlign: 'center', marginTop: 40, color: '#33334a' }}>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>🤖</div>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: '#444', marginBottom: 20 }}>
+              Ask me anything or use a quick command:
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
+              {CHAT_SUGGESTIONS.map((s, i) => (
+                <button key={i} onClick={() => sendMessage(s)} style={{
+                  padding: '6px 12px', borderRadius: 20, cursor: 'pointer',
+                  background: '#1a1a2e', border: '1px solid #2d2d4a',
+                  color: '#8b5cf6', fontFamily: 'var(--font-mono)', fontSize: 10,
+                  transition: 'all 0.15s',
+                }}
+                  onMouseEnter={e => { e.target.style.borderColor = '#8b5cf6'; e.target.style.background = '#8b5cf615'; }}
+                  onMouseLeave={e => { e.target.style.borderColor = '#2d2d4a'; e.target.style.background = '#1a1a2e'; }}
+                >{s}</button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {messages.map((msg, i) => <ChatMessage key={i} msg={msg} />)}
+        {isTyping && <ChatThinkingBubble />}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Input bar */}
+      <div style={{
+        padding: '12px 16px', background: '#08080f',
+        borderTop: '1px solid #1e1e30', flexShrink: 0,
+      }}>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end' }}>
+          <textarea
+            ref={inputRef}
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={handleKey}
+            placeholder="scan https://target.com  ·  show vulnerabilities  ·  or ask anything..."
+            rows={1}
+            style={{
+              flex: 1, resize: 'none', background: '#0f0f1a',
+              border: '1px solid #2d2d4a', borderRadius: 10,
+              padding: '10px 14px', color: '#e2e8f0', fontSize: 12.5,
+              fontFamily: 'inherit', lineHeight: 1.5, outline: 'none',
+              transition: 'border-color 0.15s',
+            }}
+            onFocus={e => { e.target.style.borderColor = '#ff450060'; }}
+            onBlur={e  => { e.target.style.borderColor = '#2d2d4a'; }}
+          />
+          <button
+            onClick={() => sendMessage()}
+            disabled={!input.trim() || isTyping}
+            style={{
+              padding: '10px 18px', borderRadius: 10, border: 'none', cursor: 'pointer',
+              background: (!input.trim() || isTyping) ? '#1a1a2e' : 'linear-gradient(135deg,#cc3700,#ff4500)',
+              color: (!input.trim() || isTyping) ? '#33334a' : '#fff',
+              fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700,
+              transition: 'all 0.15s',
+              boxShadow: (!input.trim() || isTyping) ? 'none' : '0 0 12px rgba(255,69,0,0.3)',
+            }}
+          >
+            {isTyping ? '⟳' : '↑ Send'}
+          </button>
+        </div>
+        <div style={{ fontSize: 9, color: '#33334a', marginTop: 5, fontFamily: 'var(--font-mono)' }}>
+          Enter to send · Shift+Enter for new line · Powered by {activeModel || 'local Ollama'}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
 // ║  PHANTOM AI v3 — App.jsx Part 6: Root App component + agent engine     ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 
@@ -4156,6 +4562,7 @@ export default function PhantomApp() {
               reportReady={reportReady} setView={setView}
             />
           )}
+          {view === 'chat'     && <ChatView activeModel={model} />}
           {view === 'autopilot' && <AutopilotView defaultHost={targetHost} onNewFindings={addFindings} />}
           {view === 'proxy'    && <ProxyView proxyReqs={proxyReqs} setProxyReqs={setProxyReqs}
               onSendToRepeater={req => { setRepeaterRequest({ ...req, _ts: Date.now() }); setView('repeater'); }} />}
