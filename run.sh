@@ -19,6 +19,15 @@ cd "$ROOT"
 
 echo -e "\n${BOLD}${CYAN}  ⬡  PHANTOM AI v3${NC}\n"
 
+# ── Port conflict guard ────────────────────────────────────────────────────────
+# Phantom uses port 3001 for React UI (NOT 3000 — avoids conflicts with other apps)
+# Kill anything incorrectly sitting on 3001 that isn't Phantom
+_port3001_pid=$(lsof -ti :3001 2>/dev/null || true)
+if [ -n "$_port3001_pid" ]; then
+    warn "Port 3001 already in use by PID $_port3001_pid — killing..."
+    kill "$_port3001_pid" 2>/dev/null && ok "Cleared port 3001" || warn "Could not clear port 3001"
+fi
+
 # ── 1. Ollama ─────────────────────────────────────────────────────────────────
 info "Checking Ollama..."
 if ! command -v ollama &>/dev/null; then
