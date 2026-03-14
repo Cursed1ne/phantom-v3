@@ -1,172 +1,169 @@
-# Phantom AI v3 — Session Resume Notes
-Last updated: 2026-03-07
-
-## What This Project Is
-Electron + React + FastAPI autonomous pentest platform.
-Path: `/Volumes/OneTouch/doshan_disck/phantom-v3/`
-GitHub: https://github.com/Cursed1ne/phantom-v3
-
-## Current Session Goal
-User requested 3 major fixes + features:
-1. CA cert broken → fixed with osascript admin dialog
-2. Local LLM giving wrong results → fixed model auto-detect + strict prompts
-3. Single command that does everything → built `python3 backend/cli.py scan <target>`
+# PHANTOM AI v3 — Session Resume Notes
+## Last updated: 2026-03-07 (Session 4)
 
 ---
 
-## ✅ COMPLETED STEPS
+## SESSION 4 — COMPLETED
 
-### Step 1 — CA Cert Fix (`electron/main.js` lines 439–484)
-- **What**: Replaced silent `security add-trusted-cert` with `osascript` elevation (shows macOS admin password dialog)
-- **Key change**: `execWithTimeout(osascript..., 60000)` — 60s timeout for user to type password
-- **Order**: pre-check → osascript elevation → login keychain fallback → clipboard copy + manual instructions
-- **Status**: ✅ DONE
+### Feature 1: OpenAPI / Swagger / GraphQL Discovery (`backend/autopilot.py`)
+Added `_probe_api_specs(base_url)` function called automatically after the crawler phase in `run_autopilot_scan()`.
 
-### Step 2 — LLM Fixes (`backend/agents/base.py`)
-- **What**: Added `detect_best_model()` function that queries Ollama API and prefers `qwen3-coder`
-- **What**: Changed `BaseAgent.__init__` default model from `"llama3.1"` → `""` + auto-detect
-- **What**: Rewrote `_build_system(phase)` with 2-phase strict prompts:
-  - plan phase (iter 1): `PLAN_1/2/3 + ACTION:` only, max 1200 tokens
-  - act phase (iter 2+): `THOUGHT/ACTION/ARGS/DONE` only, max 600 tokens
-- **What**: Added forced tool call guard — if LLM produces no `ACTION:` for 2 consecutive iters, injects nudge
-- **What**: `_stream_llm(system, max_tokens)` now has 3-retry backoff (2s, 4s)
-- **Status**: ✅ DONE
+- Probes 12 common OpenAPI/Swagger paths: `/openapi.json`, `/swagger.json`, `/api-docs`, etc.
+- Probes 4 GraphQL endpoints: `/graphql`, `/api/graphql`, `/gql`, `/query`
+- If spec found: extracts endpoint list, adds them to `discovered_urls` for deeper fuzzing
+- Generates findings: "Swagger spec exposed" (LOW/MEDIUM) or "GraphQL introspection enabled" (MEDIUM)
+- Results in `api_specs` key of autopilot return dict + `summary.api_specs_found` count
 
-### Step 3 — Training Data Generator (`backend/trainer.py`) — NEW FILE
-- **What**: Generates Ollama-compatible JSONL training data from verified DB findings
-- **What**: Maps finding types → correct `ACTION: tool / ARGS: exact-cli-args` templates
-- **What**: `build_training_examples(findings)` → list of JSON strings
-- **What**: `generate_dataset(db_path, out_path)` → writes .jsonl file from SQLite
-- **CLI**: `python3 backend/trainer.py --db phantom.db --out /tmp/train.jsonl --modelfile`
-- **Status**: ✅ DONE
+### Feature 2: OAuth/SSO Detection + Testing (`backend/autopilot.py`)
+Added `_test_oauth_endpoints(base_url)` function called after API spec probing.
 
-### Step 4 — Kill-Chain Graph Builder (`backend/graph_builder.py`) — NEW FILE
-- **What**: Maps findings to kill-chain phases: initial→foothold→escalation→impact
-- **What**: `build_exploitation_graph(findings, target)` → `{nodes, edges, attack_paths, risk_score, summary}`
-- **What**: Color coding: initial=blue, foothold=orange, escalation=red, impact=black
-- **Status**: ✅ DONE
+- Probes 11 OAuth/OIDC paths: `/.well-known/openid-configuration`, `/oauth/authorize`, `/connect/token`, etc.
+- Tests discovered `authorize` endpoints for 3 vulnerabilities:
+  1. **Open Redirect** (HIGH, CVSS 7.4): redirect_uri=http://evil.com accepted
+  2. **Missing State Parameter** (MEDIUM, CVSS 5.4): no state= in redirect → CSRF risk
+  3. **Implicit Flow Allowed** (LOW, CVSS 4.3): response_type=token accepted
+- Results in `oauth` key + findings added to `manual_findings`
 
-### Step 5 — Backend Upgrades (`backend/main.py`)
-- **What**: Added `detect_best_model` import + `app.state.active_model` set in lifespan
-- **What**: `ScanRequest.model` default changed from `"llama3.1"` → `""`
-- **What**: WebSocket loop uses detected model: `model = config.get("model","") or getattr(app.state,'active_model','llama3.1')`
-- **What**: `/ollama/train` now uses `trainer.build_training_examples()` (ACTION-format JSONL)
-- **What**: `/ollama/train` now only uses confirmed findings (`WHERE confirmed=1 OR confirmed IS NULL`)
-- **What**: Added auto-train trigger in `autopilot_run` (if >= 3 confirmed findings, fires background task)
-- **NEW endpoints**:
-  - `GET /ollama/active-model` → `{"model": "qwen3-coder:latest"}`
-  - `GET /ollama/training-history` → last 10 training runs
-  - `POST /graph/build` → runs `graph_builder.build_exploitation_graph()`
-  - `POST /proxy/analyze` → scans proxy history for vuln patterns, returns findings
-- **Status**: ✅ DONE
+### Feature 3: Mobile/APK Scanner (`backend/main.py`)
+New endpoint: `POST /scan/apk?apk_path=/path/to/app.apk&session_id=<optional>`
 
-### Step 6 — CLI Orchestrator (`backend/cli.py`) — NEW FILE
-- **What**: `python3 backend/cli.py scan <target>` runs full pipeline:
-  1. Check/start Ollama
-  2. Start uvicorn backend if not running
-  3. POST /sessions → session_id
-  4. POST /autopilot/run (background browser scan)
-  5. WebSocket /ws/agent → stream all agents to terminal
-  6. Wait for session_done
-  7. GET /findings/{session_id}
-  8. POST /graph/build → exploitation graph
-  9. Generate HTML report → `reports/phantom_<host>_<date>.html`
-  10. Print terminal summary table
-- **Flags**: `--agents all`, `--out ./reports/`, `--report html|json|all`, `--no-browser`, `--depth`, `--max-iter`
-- **Also**: `train` and `status` subcommands
-- **npm scripts needed**: `"scan": "python3 backend/cli.py scan"` in package.json
-- **Status**: ✅ DONE (but needs `import re` fix at top of file)
+- Decompiles with `apktool d` (resources/manifest) + `jadx -d` (Java source)
+- Greps for 9 secret patterns:
+  - Google API Key, Firebase Server Key, Google OAuth Client ID
+  - Hardcoded secrets (password=, api_key=, etc.)
+  - Hardcoded API endpoints, Insecure HTTP, Debug mode, Backup allowed, Exported components
+- Persists HIGH/MEDIUM/LOW findings to DB if session_id provided
+- Gracefully handles missing tools: "install with: brew install apktool jadx"
+
+### Feature 4: scan_apk Chat Tool (`backend/persistent_chat.py`)
+New AI tool registered in `_TOOL_HANDLERS`:
+- System prompt: `TOOL: scan_apk {"apk_path": "/path/to/app.apk"}`
+- Calls `/scan/apk` endpoint, streams finding events back to chat
+- LLM can now say "Let me scan that APK for secrets" and actually do it
+
+### Feature 5: Dedicated Report View (`src/App.jsx`)
+New `ReportView` component replacing the missing dedicated report tab.
+
+- **Risk score banner**: Computed score (0-100) with CRITICAL/HIGH/MEDIUM/LOW label
+- **Severity heatmap**: 5 colored blocks (CRITICAL/HIGH/MEDIUM/LOW/INFO) — click to expand group
+- **Expandable findings by severity**: Click severity block → shows all findings in that group
+- **Export HTML**: Opens printable/saveable HTML report in new browser tab (or `API.dialog.save`)
+- **Export JSON**: Saves structured findings JSON
+- NAV entry: `{ id: 'report', icon: '📄', label: 'Report' }` — routes to `<ReportView findings={findings} targetHost={targetHost} />`
 
 ---
 
-## ⏳ REMAINING STEPS
+## SESSION 3 — COMPLETED (kept for reference)
 
-### Step 7 — Fix `backend/cli.py` imports
-- `import re` needs to be at top of module (not inside functions)
-- `websockets` package needed: add to `backend/requirements.txt`
-- Fix: remove `import re as _re` inside `_do_scan()` and `import re` inside `main()`
+### Fix 1: WebSocket port bug (8001 → 8000)
+- `backend/cli.py` line 39: `ws://localhost:8001` → `ws://localhost:8000`
+- `src/App.jsx` line 14: WS_URL default → 8000
 
-### Step 8 — Update `src/App.jsx`
-Three changes needed:
+### Fix 2: Session loss on tab switch → Persistent chat
+- `chat_sessions` + `chat_messages` SQLite tables added
+- `backend/persistent_chat.py` created — saves every turn to DB
+- `/ws/chat` rewritten with session ID handshake + replay protocol
+- `ChatView` uses localStorage `phantom_chat_session_id` + replay events
 
-**8a. GraphView — kill-chain phase colors + "Build Graph" button**
-- Find `GraphView` component (around line 1800-2000)
-- Add `PHASE_COLORS` constant: `{initial:'#3b82f6', foothold:'#f97316', escalation:'#ef4444', impact:'#111827', unknown:'#6b7280'}`
-- Add "Build Exploitation Graph" button that calls `fetch('/proxy/analyze...` wait no: `POST http://localhost:8000/graph/build`
-- Use phase colors on SVG nodes instead of single color
+### Fix 3: Regex AI → Real LLM tool-calling
+- `persistent_chat.py` uses LLM-native TOOL: pattern
+- 9 tools: scan, run_tool, query_findings, build_graph, generate_report, train_model, analyze_proxy, target_info, scan_apk
 
-**8b. ProxyView — "Analyze Traffic" button**
-- Find `ProxyView` component (around line 2400)
-- Add a button in the toolbar: calls `POST http://localhost:8000/proxy/analyze` with current `reqs` state
-- Show results as a findings list below the proxy table
+### Fix 4: Duplicate Report tab removed
+- Old duplicate `{id: 'report', icon: '📄'}` that pointed to `FindingsView` removed
+- Now replaced with proper `ReportView`
 
-**8c. IntelView — Active model + training status**
-- Find `IntelView` component
-- On mount: fetch `GET http://localhost:8000/ollama/active-model` → show "Active model: qwen3-coder"
-- Fetch `GET http://localhost:8000/ollama/training-history` → show last training timestamp
-- Add "Auto-training: ON" badge
+---
 
-### Step 9 — `package.json` scripts
-Add to `"scripts"` section:
-```json
-"scan":    "python3 backend/cli.py scan",
-"train":   "python3 backend/cli.py train",
-"phantom": "python3 backend/cli.py"
+## ALL FILES CHANGED ACROSS SESSIONS
+
+| File | Last Changed | Change Summary |
+|------|-------------|----------------|
+| `backend/cli.py` | Session 3 | Port 8001→8000 |
+| `backend/main.py` | Session 4 | chat tables; /ws/chat rewrite; POST /scan/apk |
+| `backend/persistent_chat.py` | Session 4 | LLM agent + scan_apk tool |
+| `backend/autopilot.py` | Session 4 | OpenAPI probe + OAuth tester |
+| `src/App.jsx` | Session 4 | ReportView + Report NAV; persistent ChatView |
+| `electron/main.js` | Session 2 | CA cert fix |
+| `backend/agents/base.py` | Session 2 | LLM fixes |
+| `backend/trainer.py` | Session 2 | NEW — training data |
+| `backend/graph_builder.py` | Session 2 | NEW — kill-chain graph |
+| `backend/chat_agent.py` | Session 3 | OLD regex agent (superseded) |
+
+---
+
+## HOW TO TEST
+
+```bash
+# Start backend
+cd /Volumes/OneTouch/doshan_disck/phantom-v3/backend
+python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+# Start app (separate terminal)
+cd /Volumes/OneTouch/doshan_disck/phantom-v3
+npm start
+
+# ── Test persistent chat ──────────────────────────────────────
+# 1. Open AI Chat tab
+# 2. Type: "scan https://petstore.swagger.io"
+# 3. Switch tabs → come back → history should be there
+
+# ── Test OpenAPI discovery ────────────────────────────────────
+# Scan a Swagger target — check autopilot result for "api_specs" key
+curl -s -X POST http://localhost:8000/autopilot/run \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"test","target":"https://petstore.swagger.io"}' | python3 -m json.tool | grep -A5 api_specs
+
+# ── Test APK scan ─────────────────────────────────────────────
+curl -s -X POST "http://localhost:8000/scan/apk?apk_path=/path/to/app.apk"
+
+# ── Test Report view ──────────────────────────────────────────
+# Run agents → click 📄 Report tab
+# → Severity heatmap + risk score shown
+# → Click any severity block → findings expand
+# → Click "Export HTML" → printable report opens
+
+# ── Check GitHub is PRIVATE ───────────────────────────────────
+gh repo view Cursed1ne/phantom-v3 --json visibility
+# → {"visibility":"PRIVATE"}
 ```
 
-### Step 10 — Git commit + push
+---
+
+## GITHUB STATUS
+- Repo: https://github.com/Cursed1ne/phantom-v3
+- Visibility: PRIVATE (created with --private flag)
+- Changes in Sessions 3+4: **NOT pushed** (user request)
+- Last pushed: commit 9149955
+
+When ready to push:
 ```bash
 cd /Volumes/OneTouch/doshan_disck/phantom-v3
-git add -A
-git commit -m "feat: single-command CLI + kill-chain graph + LLM fix + CA cert fix + auto-train"
+git add backend/cli.py backend/main.py backend/persistent_chat.py backend/autopilot.py src/App.jsx RESUME.md
+git commit -m "feat: OpenAPI/OAuth/APK scanning + ReportView + persistent LLM chat"
 git push origin main
 ```
 
 ---
 
-## HOW TO RESUME
+## CLAUDE CODE LIMITS — HOW TO EXTEND
 
-Tell Claude:
-> "resume phantom-v3 from RESUME.md — we need to complete steps 7-10"
-
-Or more specifically:
-> "fix the cli.py import, update App.jsx with graph colors + Analyze Traffic + IntelView model status, add npm scripts, then git push"
-
-Key files:
-- `/Volumes/OneTouch/doshan_disck/phantom-v3/backend/cli.py` — fix `import re`
-- `/Volumes/OneTouch/doshan_disck/phantom-v3/backend/requirements.txt` — add `websockets`
-- `/Volumes/OneTouch/doshan_disck/phantom-v3/src/App.jsx` — 3 UI changes (graph, proxy, intel)
-- `/Volumes/OneTouch/doshan_disck/phantom-v3/package.json` — add scan/train/phantom scripts
+| Method | How |
+|--------|-----|
+| `/compact` | Compresses current context to ~20% size. Run before hitting the limit. |
+| `/resume` | On restart, restores previous session context |
+| Claude Max | $100–200/mo — much higher rate limits |
+| Own API key | `ANTHROPIC_API_KEY=sk-ant-... claude` — pay per token, no hard cap |
+| Split sessions | Independent features in separate sessions avoids context bloat |
 
 ---
 
-## QUICK TEST COMMANDS (after everything is done)
-```bash
-# Test CLI
-python3 backend/cli.py status
-python3 backend/cli.py scan http://testphp.vulnweb.com
+## NEXT STEPS (future sessions)
 
-# Test backend endpoints
-curl http://localhost:8000/ollama/active-model
-curl http://localhost:8000/ollama/training-history
-curl -X POST http://localhost:8000/graph/build -H 'Content-Type: application/json' -d '{}'
-
-# Test cert (Phantom app must be running)
-# Settings → Install CA → should see macOS admin password dialog
-```
-
-## ARCHITECTURE SUMMARY
-```
-electron/main.js      ← HTTPS proxy + IPC + cert install (FIXED: osascript elevation)
-backend/
-  main.py             ← FastAPI :8000, WebSocket :8001 (FIXED: model auto-detect, new endpoints)
-  cli.py              ← NEW: single command scan orchestrator
-  autopilot.py        ← Playwright browser crawl + tool chain
-  trainer.py          ← NEW: LLM training data generator
-  graph_builder.py    ← NEW: kill-chain exploitation graph
-  agents/
-    base.py           ← FIXED: model detect, strict prompts, retry, forced tool call
-    planner/recon/web/identity/network/cloud/exploit.py
-src/App.jsx           ← React UI (PENDING: graph colors, Analyze Traffic, Intel model)
-package.json          ← PENDING: scan/train/phantom scripts
-```
+1. **Verify end-to-end**: Start backend + app, scan a real target, check OpenAPI/OAuth probes fire
+2. **Parallel agents**: Run recon + web agents simultaneously (asyncio.gather in run_autopilot_scan)
+3. **Live scan output in chat**: Connect /ws/agent stream → relay findings to chat in real time
+4. **GraphQL security testing**: If introspection enabled → query for mutations, test for injection
+5. **Better APK testing**: Add MobSF integration for deeper analysis
+6. **CORS testing**: Check Access-Control-Allow-Origin: * + credentialed requests
+7. **GitHub push** when user is ready

@@ -3303,6 +3303,250 @@ docker exec phantom_neo4j cypher-shell -u neo4j -p phantom123 "RETURN 1"`}</pre>
   );
 }
 
+// ── Report view ────────────────────────────────────────────────────────────
+const SEV_CFG = {
+  CRITICAL: { color: '#ef4444', bg: '#1a0505', border: '#7f1d1d', icon: '💀', weight: 10 },
+  HIGH:     { color: '#fb923c', bg: '#1a0d05', border: '#7c2d12', icon: '🔴', weight: 5  },
+  MEDIUM:   { color: '#fbbf24', bg: '#1a1505', border: '#713f12', icon: '⚠',  weight: 2  },
+  LOW:      { color: '#34d399', bg: '#051a0d', border: '#064e3b', icon: 'ℹ',  weight: 0.5},
+  INFO:     { color: '#60a5fa', bg: '#050f1a', border: '#1e3a5f', icon: '💡', weight: 0  },
+};
+const SEV_ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'];
+
+function ReportView({ findings, targetHost }) {
+  const [expanded, setExpanded] = useState({});
+  const toggleExpand = (sev) => setExpanded(e => ({ ...e, [sev]: !e[sev] }));
+
+  const counts = {};
+  SEV_ORDER.forEach(s => { counts[s] = findings.filter(f => (f.sev || 'INFO') === s).length; });
+  const risk = Math.min(100,
+    (counts.CRITICAL || 0) * SEV_CFG.CRITICAL.weight +
+    (counts.HIGH     || 0) * SEV_CFG.HIGH.weight     +
+    (counts.MEDIUM   || 0) * SEV_CFG.MEDIUM.weight   +
+    (counts.LOW      || 0) * SEV_CFG.LOW.weight
+  );
+  const riskLabel = risk >= 50 ? 'CRITICAL RISK' : risk >= 20 ? 'HIGH RISK' : risk >= 8 ? 'MEDIUM RISK' : 'LOW RISK';
+  const riskColor = risk >= 50 ? '#ef4444' : risk >= 20 ? '#fb923c' : risk >= 8 ? '#fbbf24' : '#34d399';
+
+  function buildReportHTML() {
+    const now = new Date().toLocaleString();
+    const sortedF = [...findings].sort((a, b) => {
+      const ao = SEV_ORDER.indexOf(a.sev || 'INFO');
+      const bo = SEV_ORDER.indexOf(b.sev || 'INFO');
+      return ao - bo;
+    });
+    return `<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>PHANTOM AI v3 — Penetration Test Report</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0a0a0f;color:#e8e8f0;min-height:100vh}
+.cover{background:linear-gradient(135deg,#1a0505,#0a0a1f);padding:56px 60px;border-bottom:3px solid #ff4500}
+.cover h1{font-size:30px;letter-spacing:4px;color:#ff4500;font-weight:900;text-transform:uppercase}
+.cover .sub{font-size:12px;color:#555;letter-spacing:2px;margin-top:6px;font-family:monospace}
+.cover .meta{margin-top:20px;display:flex;gap:16px;flex-wrap:wrap}
+.cover .meta span{font-size:10px;color:#666;padding:3px 10px;border:1px solid #333;border-radius:4px;font-family:monospace}
+.wrap{max-width:1100px;margin:0 auto;padding:40px 56px}
+.sec{font-size:9px;letter-spacing:3px;color:#ff4500;margin:32px 0 14px;padding-bottom:7px;border-bottom:1px solid rgba(255,69,0,0.2);text-transform:uppercase;font-weight:700}
+.heatmap{display:flex;gap:12px;margin-bottom:28px;flex-wrap:wrap}
+.hm-block{border-radius:10px;padding:18px 22px;text-align:center;border:1px solid;min-width:110px}
+.hm-num{font-size:44px;font-weight:900;line-height:1}
+.hm-lbl{font-size:8px;letter-spacing:3px;margin-top:4px;opacity:.6;text-transform:uppercase;font-family:monospace}
+.risk-score{font-size:72px;font-weight:900;line-height:1;margin:8px 0}
+.badge{font-size:8.5px;font-weight:700;letter-spacing:1.5px;padding:2px 8px;border-radius:4px;border:1px solid;white-space:nowrap;font-family:monospace}
+.finding{border:1px solid #1e1e30;border-radius:8px;margin-bottom:7px;overflow:hidden}
+.fh{padding:10px 14px;display:flex;align-items:center;gap:10px;background:#0f0f1a}
+.fb{padding:9px 14px;font-size:11px;color:#888;line-height:1.7;border-top:1px solid #1e1e30;font-family:monospace}
+footer{text-align:center;padding:22px;font-size:9px;color:#33334a;border-top:1px solid #1e1e30;margin-top:36px;font-family:monospace}
+</style></head><body>
+<div class="cover">
+  <h1>PHANTOM AI v3</h1>
+  <div class="sub">PENETRATION TEST REPORT</div>
+  <div class="meta">
+    <span>Target: ${targetHost || 'Unknown'}</span>
+    <span>Generated: ${now}</span>
+    <span>Findings: ${findings.length}</span>
+    <span>Risk Score: ${risk.toFixed(0)}/100</span>
+  </div>
+</div>
+<div class="wrap">
+  <div class="sec">Executive Summary</div>
+  <div class="risk-score" style="color:${riskColor}">${risk.toFixed(0)}<span style="font-size:18px;opacity:.5">/100</span></div>
+  <div style="font-size:14px;color:${riskColor};margin-bottom:24px;letter-spacing:2px;font-weight:700">${riskLabel}</div>
+  <div class="sec">Severity Breakdown</div>
+  <div class="heatmap">
+    ${SEV_ORDER.map(s => `<div class="hm-block" style="background:${SEV_CFG[s].bg};border-color:${SEV_CFG[s].border}">
+      <div class="hm-num" style="color:${SEV_CFG[s].color}">${counts[s] || 0}</div>
+      <div class="hm-lbl">${s}</div>
+    </div>`).join('')}
+  </div>
+  <div class="sec">All Findings</div>
+  ${sortedF.map(f => {
+    const cfg = SEV_CFG[f.sev || 'INFO'] || SEV_CFG.INFO;
+    return `<div class="finding">
+      <div class="fh">
+        <span class="badge" style="background:${cfg.bg};color:${cfg.color};border-color:${cfg.border}">${f.sev || 'INFO'}</span>
+        <strong style="flex:1">${(f.desc || '').substring(0, 130)}</strong>
+        <span style="font-size:9.5px;color:#555;font-family:monospace">${f.agent || ''} · ${f.tool || ''}</span>
+      </div>
+      <div class="fb">CVSS: ${f.cvss || 'N/A'} · Agent: ${f.agent || '-'} · Tool: ${f.tool || '-'}</div>
+    </div>`;
+  }).join('')}
+  <footer>PHANTOM AI v3 · Autonomous Penetration Testing Platform · For authorized security testing only</footer>
+</div></body></html>`;
+  }
+
+  function exportHTML() {
+    const html = buildReportHTML();
+    const w = window.open('', '_blank');
+    if (w) { w.document.write(html); w.document.close(); }
+    else if (typeof API !== 'undefined' && API?.dialog?.save) {
+      API.dialog.save(html, `phantom_report_${Date.now()}.html`);
+    }
+  }
+
+  function exportJSON() {
+    const data = JSON.stringify({
+      generated_at: new Date().toISOString(),
+      target: targetHost,
+      risk_score: risk,
+      risk_label: riskLabel,
+      severity_counts: counts,
+      findings: findings.map(f => ({
+        severity: f.sev, description: f.desc,
+        agent: f.agent, tool: f.tool, cvss: f.cvss, iter: f.iter, ts: f.ts,
+      })),
+    }, null, 2);
+    if (typeof API !== 'undefined' && API?.dialog?.save) {
+      API.dialog.save(data, `phantom_report_${Date.now()}.json`);
+    } else {
+      const a = document.createElement('a');
+      a.href = 'data:application/json;charset=utf-8,' + encodeURIComponent(data);
+      a.download = `phantom_report_${Date.now()}.json`;
+      a.click();
+    }
+  }
+
+  const cardBase = {
+    background: 'var(--bg-card)', border: '1px solid var(--border)',
+    borderRadius: 'var(--radius-lg)', padding: 20, marginBottom: 12,
+  };
+
+  return (
+    <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
+      <SectionHeader icon="📄" title="PENTEST REPORT" subtitle={`${findings.length} findings · Risk score ${risk.toFixed(0)}/100`} color="#ff4500" />
+
+      {/* Risk score banner */}
+      <div style={{ ...cardBase, display: 'flex', alignItems: 'center', gap: 32, marginBottom: 16 }}>
+        <div>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 64, fontWeight: 900, color: riskColor, lineHeight: 1 }}>
+            {risk.toFixed(0)}
+          </div>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, letterSpacing: 3, color: riskColor, marginTop: 4, opacity: 0.8 }}>
+            / 100 RISK SCORE
+          </div>
+        </div>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: riskColor, letterSpacing: 2, marginBottom: 6 }}>
+            {riskLabel}
+          </div>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: '#555', lineHeight: 1.7 }}>
+            Target: {targetHost || 'Unknown'}<br />
+            Generated: {new Date().toLocaleString()}<br />
+            Total findings: {findings.length}
+          </div>
+        </div>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          <Btn onClick={exportHTML} color="#cc3700">📄 Export HTML</Btn>
+          <GhostBtn onClick={exportJSON} color="#3b82f6">📋 Export JSON</GhostBtn>
+        </div>
+      </div>
+
+      {/* Severity heatmap */}
+      <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
+        {SEV_ORDER.map(s => {
+          const cfg = SEV_CFG[s];
+          const cnt = counts[s] || 0;
+          return (
+            <div
+              key={s}
+              onClick={() => toggleExpand(s)}
+              style={{
+                flex: 1, background: cfg.bg, border: `1px solid ${cfg.border}`,
+                borderRadius: 10, padding: '16px 12px', textAlign: 'center', cursor: 'pointer',
+                transition: 'opacity .15s', opacity: cnt === 0 ? 0.4 : 1,
+                outline: expanded[s] ? `2px solid ${cfg.color}` : 'none',
+              }}
+            >
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 38, fontWeight: 900, color: cfg.color, lineHeight: 1 }}>
+                {cnt}
+              </div>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 8, letterSpacing: 2, color: cfg.color, marginTop: 4, opacity: 0.7 }}>
+                {s}
+              </div>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: '#33334a', marginTop: 2 }}>
+                {cnt === 0 ? '—' : `${cfg.icon} click to view`}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Grouped findings (toggle per severity) */}
+      {findings.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: 56, background: 'var(--bg-card)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border)', color: '#33334a' }}>
+          No findings yet — run a scan first, then come back here to generate your report
+        </div>
+      ) : (
+        SEV_ORDER.map(s => {
+          const group = findings.filter(f => (f.sev || 'INFO') === s);
+          if (!group.length) return null;
+          const cfg = SEV_CFG[s];
+          return (
+            <div key={s} style={{ marginBottom: 10 }}>
+              <button
+                onClick={() => toggleExpand(s)}
+                style={{
+                  width: '100%', background: cfg.bg, border: `1px solid ${cfg.border}`,
+                  borderRadius: expanded[s] ? '8px 8px 0 0' : 8,
+                  padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 10,
+                  cursor: 'pointer', color: cfg.color,
+                }}
+              >
+                <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, letterSpacing: 2, fontSize: 11 }}>
+                  {cfg.icon} {s}
+                </span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, opacity: 0.6, marginLeft: 4 }}>
+                  {group.length} finding{group.length !== 1 ? 's' : ''}
+                </span>
+                <span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 10 }}>
+                  {expanded[s] ? '▲' : '▼'}
+                </span>
+              </button>
+              {expanded[s] && (
+                <div style={{ background: 'var(--bg-card)', border: `1px solid ${cfg.border}`, borderTop: 0, borderRadius: '0 0 8px 8px', overflow: 'hidden' }}>
+                  {group.map((f, i) => (
+                    <div key={i} style={{ padding: '10px 16px', borderBottom: i < group.length - 1 ? '1px solid var(--border)' : 'none' }}>
+                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                        <SevBadge sev={f.sev || 'INFO'} />
+                        <div style={{ flex: 1 }}>
+                          <div style={{ color: '#e8e8f0', fontSize: 12, lineHeight: 1.5 }}>{f.desc}</div>
+                          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: '#555', marginTop: 4 }}>
+                            CVSS {f.cvss || 'N/A'} · Agent: {f.agent || '-'} · Tool: {f.tool || '-'}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
 // ── Findings view ──────────────────────────────────────────────────────────
 function FindingsView({ findings, activeAgents, usedTools, learned, proxyReqs = [] }) {
   const fCrit = findings.filter(f => f.sev === 'CRITICAL').length;
@@ -3897,61 +4141,76 @@ function ChatView({ activeModel }) {
   const [input,     setInput]     = useState('');
   const [isTyping,  setIsTyping]  = useState(false);
   const [connected, setConnected] = useState(false);
-  const wsRef     = useRef(null);
-  const bottomRef = useRef(null);
-  const inputRef  = useRef(null);
+  const [sessionId, setSessionId] = useState(null);
+  const wsRef        = useRef(null);
+  const bottomRef    = useRef(null);
+  const inputRef     = useRef(null);
+  const aiMsgRef     = useRef(null);   // tracks current streaming AI message index
 
-  // -- Helpers --
   const now = () => new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-
   const scrollBottom = () =>
-    setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 30);
+    setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 40);
 
-  // Append a block to the last AI message (for streaming)
+  // -- Append a block/token to the current streaming AI bubble --
   const appendBlock = (block) => {
     setMessages(prev => {
       const msgs = [...prev];
-      const last = msgs[msgs.length - 1];
-      if (last && last.role === 'assistant') {
-        // If it's a token, merge into last text block
-        if (block.type === 'token') {
-          const blocks = [...last.blocks];
-          const lb = blocks[blocks.length - 1];
-          if (lb && lb.type === 'token') {
-            blocks[blocks.length - 1] = { ...lb, text: lb.text + block.text };
-          } else {
-            blocks.push({ type: 'token', text: block.text });
-          }
-          msgs[msgs.length - 1] = { ...last, blocks };
+      const idx  = aiMsgRef.current ?? msgs.length - 1;
+      const msg  = msgs[idx];
+      if (!msg || msg.role !== 'assistant') return prev;
+
+      if (block.type === 'token') {
+        // Merge token into last token block for efficiency
+        const blocks = [...msg.blocks];
+        const lb = blocks[blocks.length - 1];
+        if (lb && lb.type === 'token') {
+          blocks[blocks.length - 1] = { ...lb, text: lb.text + block.text };
         } else {
-          msgs[msgs.length - 1] = { ...last, blocks: [...last.blocks, block] };
+          blocks.push({ type: 'token', text: block.text });
         }
-        return msgs;
+        msgs[idx] = { ...msg, blocks };
+      } else {
+        msgs[idx] = { ...msg, blocks: [...msg.blocks, block] };
       }
-      return prev;
+      return msgs;
     });
     scrollBottom();
   };
 
-  // -- WebSocket setup --
+  // -- Ensure an AI bubble exists (create one if needed) --
+  const ensureAiBubble = () => {
+    setMessages(prev => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === 'assistant') {
+        aiMsgRef.current = prev.length - 1;
+        return prev;
+      }
+      aiMsgRef.current = prev.length;
+      return [...prev, { role: 'assistant', blocks: [], ts: '' }];
+    });
+  };
+
+  // -- WebSocket connection --
   useEffect(() => {
-    const CHAT_WS = `ws://localhost:${window.phantom?.BACKEND_PORT || 8000}/ws/chat`;
+    const PORT = window.phantom?.BACKEND_PORT || 8000;
+    const CHAT_WS = `ws://localhost:${PORT}/ws/chat`;
     const ws = new WebSocket(CHAT_WS);
     wsRef.current = ws;
 
     ws.onopen = () => {
       setConnected(true);
+      // Send saved session ID (or null for new session)
+      const saved = localStorage.getItem('phantom_chat_session_id') || null;
+      ws.send(JSON.stringify({ action: 'connect', chat_session_id: saved }));
     };
 
-    ws.onclose = () => {
-      setConnected(false);
-    };
+    ws.onclose = () => { setConnected(false); };
 
     ws.onerror = () => {
       setConnected(false);
       setMessages(prev => [...prev, {
         role: 'assistant',
-        blocks: [{ type: 'text', text: '⚠ Cannot connect to Phantom backend. Make sure the backend is running on port 8000.' }],
+        blocks: [{ type: 'text', text: '⚠ Cannot reach Phantom backend (port 8000). Start the backend first.' }],
         ts: now(),
       }]);
     };
@@ -3959,45 +4218,84 @@ function ChatView({ activeModel }) {
     ws.onmessage = ({ data }) => {
       try {
         const ev = JSON.parse(data);
+
+        // ── Session management ──
+        if (ev.type === 'session_init') {
+          setSessionId(ev.chat_session_id);
+          localStorage.setItem('phantom_chat_session_id', ev.chat_session_id);
+          return;
+        }
+
+        // ── History replay (reconnect) ──
+        if (ev.type === 'replay_start') {
+          setMessages([]);  // clear, will be refilled
+          setIsTyping(false);
+          return;
+        }
+        if (ev.type === 'replay_done') {
+          setIsTyping(false);
+          scrollBottom();
+          return;
+        }
+        if (ev.type === 'message') {
+          // Replayed message from DB
+          setMessages(prev => [
+            ...prev,
+            {
+              role:   ev.role,
+              blocks: [{ type: 'text', text: ev.content }],
+              ts:     ev.ts || '',
+            },
+          ]);
+          return;
+        }
+
+        // ── End of response ──
         if (ev.type === 'done') {
           setIsTyping(false);
-          // Finalise the streaming message timestamp
           setMessages(prev => {
             const msgs = [...prev];
-            if (msgs[msgs.length - 1]?.role === 'assistant') {
-              msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], ts: now() };
+            const idx  = aiMsgRef.current ?? msgs.length - 1;
+            if (msgs[idx]?.role === 'assistant') {
+              msgs[idx] = { ...msgs[idx], ts: now() };
             }
             return msgs;
           });
+          aiMsgRef.current = null;
           return;
         }
-        // First event of a new AI response — create the message shell
-        setMessages(prev => {
-          const last = prev[prev.length - 1];
-          if (!last || last.role === 'user') {
-            return [...prev, { role: 'assistant', blocks: [], ts: '' }];
-          }
-          return prev;
-        });
-        appendBlock(ev);
+
+        // ── Streaming content ──
+        // Ensure AI bubble exists before appending
+        if (['token', 'text', 'finding', 'scan_start', 'tool_result'].includes(ev.type)) {
+          setMessages(prev => {
+            const last = prev[prev.length - 1];
+            if (!last || last.role !== 'assistant') {
+              aiMsgRef.current = prev.length;
+              return [...prev, { role: 'assistant', blocks: [], ts: '' }];
+            }
+            if (aiMsgRef.current === null) aiMsgRef.current = prev.length - 1;
+            return prev;
+          });
+          appendBlock(ev);
+        }
       } catch (_) {}
     };
 
     return () => ws.close();
-  }, []);   // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
 
-  // -- Send --
+  // -- Send message --
   const sendMessage = (text) => {
     const msg = (text || input).trim();
     if (!msg || isTyping) return;
     setInput('');
+    aiMsgRef.current = null;
 
-    // Add user message
-    setMessages(prev => [...prev, {
-      role: 'user',
-      blocks: [{ type: 'text', text: msg }],
-      ts: now(),
-    }]);
+    setMessages(prev => [
+      ...prev,
+      { role: 'user', blocks: [{ type: 'text', text: msg }], ts: now() },
+    ]);
     setIsTyping(true);
     scrollBottom();
 
@@ -4007,22 +4305,34 @@ function ChatView({ activeModel }) {
       setIsTyping(false);
       setMessages(prev => [...prev, {
         role: 'assistant',
-        blocks: [{ type: 'text', text: '⚠ Not connected. Refresh to reconnect.' }],
+        blocks: [{ type: 'text', text: '⚠ Disconnected. Please refresh the page.' }],
         ts: now(),
       }]);
     }
   };
 
   const handleKey = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  };
+
+  const clearHistory = () => {
+    localStorage.removeItem('phantom_chat_session_id');
+    setMessages([]);
+    setSessionId(null);
+    wsRef.current?.close();
+    // Re-open — will create a fresh session
+    setTimeout(() => {
+      const PORT = window.phantom?.BACKEND_PORT || 8000;
+      const ws = new WebSocket(`ws://localhost:${PORT}/ws/chat`);
+      wsRef.current = ws;
+      ws.onopen = () => { setConnected(true); ws.send(JSON.stringify({ action: 'connect', chat_session_id: null })); };
+      ws.onclose = () => setConnected(false);
+      ws.onmessage = ({ data }) => { try { const ev = JSON.parse(data); if (ev.type === 'session_init') { setSessionId(ev.chat_session_id); localStorage.setItem('phantom_chat_session_id', ev.chat_session_id); } } catch(_){} };
+    }, 300);
   };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#07070e' }}>
-      {/* Keyframe for thinking dots */}
       <style>{`
         @keyframes chatPulse {
           0%,80%,100% { opacity: 0.2; transform: scale(0.8); }
@@ -4032,46 +4342,50 @@ function ChatView({ activeModel }) {
 
       {/* Header */}
       <div style={{
-        padding: '12px 16px', background: '#08080f',
+        padding: '10px 16px', background: '#08080f',
         borderBottom: '1px solid #1e1e30', flexShrink: 0,
         display: 'flex', alignItems: 'center', gap: 10,
       }}>
-        <div style={{ fontSize: 20 }}>💬</div>
-        <div>
+        <div style={{ fontSize: 18 }}>💬</div>
+        <div style={{ flex: 1 }}>
           <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: '#ff4500', letterSpacing: 2 }}>
-            PHANTOM AI CHAT
+            PHANTOM AI — AUTONOMOUS PENTEST AGENT
           </div>
           <div style={{ fontSize: 9, color: '#33334a', fontFamily: 'var(--font-mono)' }}>
-            Natural-language pentest control · Model: {activeModel || 'auto'}
+            Session: {sessionId ? sessionId.slice(0,8)+'…' : 'connecting…'} · Model: {activeModel || 'auto'}
           </div>
         </div>
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <button onClick={clearHistory} title="Start new conversation" style={{
+          padding: '3px 8px', borderRadius: 4, border: '1px solid #2d2d4a',
+          background: 'transparent', color: '#555', cursor: 'pointer',
+          fontFamily: 'var(--font-mono)', fontSize: 9,
+        }}>New Chat</button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
           <div style={{
             width: 7, height: 7, borderRadius: '50%',
             background: connected ? '#10b981' : '#ef4444',
             boxShadow: connected ? '0 0 6px #10b981' : 'none',
           }} />
           <span style={{ fontSize: 9, fontFamily: 'var(--font-mono)', color: connected ? '#10b981' : '#ef4444' }}>
-            {connected ? 'CONNECTED' : 'OFFLINE'}
+            {connected ? 'LIVE' : 'OFFLINE'}
           </span>
         </div>
       </div>
 
       {/* Messages */}
       <div style={{ flex: 1, overflow: 'auto', padding: '16px 20px' }}>
-        {messages.length === 0 && (
-          <div style={{ textAlign: 'center', marginTop: 40, color: '#33334a' }}>
-            <div style={{ fontSize: 40, marginBottom: 12 }}>🤖</div>
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: '#444', marginBottom: 20 }}>
-              Ask me anything or use a quick command:
+        {messages.length === 0 && !isTyping && (
+          <div style={{ textAlign: 'center', marginTop: 50, color: '#33334a' }}>
+            <div style={{ fontSize: 42, marginBottom: 14 }}>🤖</div>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: '#444', marginBottom: 18 }}>
+              Your autonomous penetration testing AI — ask anything:
             </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', maxWidth: 500, margin: '0 auto' }}>
               {CHAT_SUGGESTIONS.map((s, i) => (
                 <button key={i} onClick={() => sendMessage(s)} style={{
-                  padding: '6px 12px', borderRadius: 20, cursor: 'pointer',
+                  padding: '6px 14px', borderRadius: 20, cursor: 'pointer',
                   background: '#1a1a2e', border: '1px solid #2d2d4a',
                   color: '#8b5cf6', fontFamily: 'var(--font-mono)', fontSize: 10,
-                  transition: 'all 0.15s',
                 }}
                   onMouseEnter={e => { e.target.style.borderColor = '#8b5cf6'; e.target.style.background = '#8b5cf615'; }}
                   onMouseLeave={e => { e.target.style.borderColor = '#2d2d4a'; e.target.style.background = '#1a1a2e'; }}
@@ -4080,13 +4394,12 @@ function ChatView({ activeModel }) {
             </div>
           </div>
         )}
-
         {messages.map((msg, i) => <ChatMessage key={i} msg={msg} />)}
         {isTyping && <ChatThinkingBubble />}
         <div ref={bottomRef} />
       </div>
 
-      {/* Input bar */}
+      {/* Input */}
       <div style={{
         padding: '12px 16px', background: '#08080f',
         borderTop: '1px solid #1e1e30', flexShrink: 0,
@@ -4097,14 +4410,13 @@ function ChatView({ activeModel }) {
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKey}
-            placeholder="scan https://target.com  ·  show vulnerabilities  ·  or ask anything..."
+            placeholder="scan https://target.com  ·  show findings  ·  run nmap against target.com  ·  or ask anything..."
             rows={1}
             style={{
               flex: 1, resize: 'none', background: '#0f0f1a',
               border: '1px solid #2d2d4a', borderRadius: 10,
               padding: '10px 14px', color: '#e2e8f0', fontSize: 12.5,
               fontFamily: 'inherit', lineHeight: 1.5, outline: 'none',
-              transition: 'border-color 0.15s',
             }}
             onFocus={e => { e.target.style.borderColor = '#ff450060'; }}
             onBlur={e  => { e.target.style.borderColor = '#2d2d4a'; }}
@@ -4113,11 +4425,13 @@ function ChatView({ activeModel }) {
             onClick={() => sendMessage()}
             disabled={!input.trim() || isTyping}
             style={{
-              padding: '10px 18px', borderRadius: 10, border: 'none', cursor: 'pointer',
-              background: (!input.trim() || isTyping) ? '#1a1a2e' : 'linear-gradient(135deg,#cc3700,#ff4500)',
+              padding: '10px 18px', borderRadius: 10, border: 'none',
+              cursor: (!input.trim() || isTyping) ? 'not-allowed' : 'pointer',
+              background: (!input.trim() || isTyping)
+                ? '#1a1a2e'
+                : 'linear-gradient(135deg,#cc3700,#ff4500)',
               color: (!input.trim() || isTyping) ? '#33334a' : '#fff',
               fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700,
-              transition: 'all 0.15s',
               boxShadow: (!input.trim() || isTyping) ? 'none' : '0 0 12px rgba(255,69,0,0.3)',
             }}
           >
@@ -4125,7 +4439,7 @@ function ChatView({ activeModel }) {
           </button>
         </div>
         <div style={{ fontSize: 9, color: '#33334a', marginTop: 5, fontFamily: 'var(--font-mono)' }}>
-          Enter to send · Shift+Enter for new line · Powered by {activeModel || 'local Ollama'}
+          Enter to send · Shift+Enter new line · History persists across tab switches · {activeModel || 'Ollama LLM'}
         </div>
       </div>
     </div>
@@ -4574,7 +4888,7 @@ export default function PhantomApp() {
           {view === 'developer' && <DeveloperView findings={findings} proxyReqs={proxyReqs} targetHost={targetHost} />}
           {view === 'intel'    && <IntelView learned={learned} onClearLearned={() => { setLearned([]); localStorage.removeItem('phantom_v3_learned'); }} />}
           {view === 'findings' && <FindingsView findings={findings} activeAgents={activeAgents} usedTools={usedTools} learned={learned} proxyReqs={proxyReqs} />}
-          {view === 'report'   && <FindingsView findings={findings} activeAgents={activeAgents} usedTools={usedTools} learned={learned} proxyReqs={proxyReqs} />}
+          {view === 'report'   && <ReportView findings={findings} targetHost={targetHost} />}
           {view === 'settings' && <SettingsView ollamaOk={ollamaOk} models={models} model={model} setModel={setModel} onCheck={checkOllama} />}
         </div>
       </div>

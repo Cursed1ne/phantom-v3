@@ -4,7 +4,35 @@
  * Fixed: proxy error handling, port fallback, cert install timeout,
  *        per-host cert persistence, intercept queue, request replay.
  */
+
+// ── Global safety net — swallow network noise (ECONNRESET etc.) ──────────────
+process.on('uncaughtException', (err) => {
+  const ignore = ['ECONNRESET', 'EPIPE', 'ECONNABORTED', 'ENOTFOUND', 'ETIMEDOUT'];
+  if (ignore.some(c => err.code === c || (err.message || '').includes(c))) return;
+  // For anything else, log but don't crash
+  try { require('electron-log').error('[uncaughtException]', err.message); } catch {}
+});
+process.on('unhandledRejection', (reason) => {
+  try { require('electron-log').warn('[unhandledRejection]', reason); } catch {}
+});
+const zlib   = require('zlib');
 const { app, BrowserWindow, ipcMain, Menu, shell, dialog } = require('electron');
+
+// ── Decompress proxy response body ───────────────────────────────────────────
+function decompressBody(buf, encoding) {
+  if (!buf || !buf.length) return '';
+  try {
+    const enc = (encoding || '').toLowerCase();
+    let out;
+    if (enc === 'gzip')              out = zlib.gunzipSync(buf);
+    else if (enc === 'deflate')      out = zlib.inflateSync(buf);
+    else if (enc === 'br')           out = zlib.brotliDecompressSync(buf);
+    else                             out = buf;
+    return out.toString('utf8').slice(0, 8000);
+  } catch {
+    return buf.toString('utf8', 0, Math.min(buf.length, 500)) + ' [decode error]';
+  }
+}
 const path   = require('path');
 const fs     = require('fs');
 const http   = require('http');
@@ -202,16 +230,22 @@ function buildProxy(ca) {
       const forward = (body) => new Promise(resolve => {
         const o = urlMod.parse(req.url);
         o.method  = req.method;
-        o.headers = { ...req.headers };
+        o.headers = { ...req.headers, 'accept-encoding': 'gzip, deflate' }; // no brotli for http
         const pr = http.request(o, pRes => {
-          let rb = '';
-          pRes.on('data', c => rb += c);
+          const chunks = [];
+          pRes.on('data', c => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
           pRes.on('error', () => resolve());
           pRes.on('end', () => {
-            rd.response = { status:pRes.statusCode, headers:pRes.headers, body:rb.slice(0,4000) };
-            bcast({ type:'proxy_response', request:{ ...rd, response:{ ...rd.response, body:rd.response.body.slice(0,400) } } });
-            res.writeHead(pRes.statusCode, pRes.headers);
-            res.end(rb);
+            const rawBuf = Buffer.concat(chunks);
+            const enc    = pRes.headers['content-encoding'] || '';
+            const bodyStr = decompressBody(rawBuf, enc);
+            // Strip content-encoding before forwarding decoded body
+            const fwdHeaders = { ...pRes.headers };
+            delete fwdHeaders['content-encoding'];
+            rd.response = { status:pRes.statusCode, headers:pRes.headers, body:bodyStr };
+            bcast({ type:'proxy_response', request:{ ...rd, response:{ ...rd.response, body:bodyStr.slice(0,800) } } });
+            res.writeHead(pRes.statusCode, fwdHeaders);
+            res.end(bodyStr);
             resolve();
           });
         });
@@ -244,17 +278,25 @@ function buildProxy(ca) {
       hReq.on('error', () => hRes.end());
       hReq.on('end', async () => {
         const forward = (body) => new Promise(resolve => {
-          const o = { hostname:host, port, path:hReq.url, method:hReq.method,
-                      headers:{ ...hReq.headers }, rejectUnauthorized:false };
+          const o = {
+            hostname: host, port, path: hReq.url, method: hReq.method,
+            headers: { ...hReq.headers, 'accept-encoding': 'gzip, deflate, br' },
+            rejectUnauthorized: false,
+          };
           const pr = https.request(o, pRes => {
-            let rb = '';
-            pRes.on('data', c => rb += c);
+            const chunks = [];
+            pRes.on('data', c => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
             pRes.on('error', () => resolve());
             pRes.on('end', () => {
-              rd.response = { status:pRes.statusCode, headers:pRes.headers, body:rb.slice(0,4000) };
-              bcast({ type:'proxy_response', request:{ ...rd, response:{ ...rd.response, body:rd.response.body.slice(0,400) } } });
-              hRes.writeHead(pRes.statusCode, pRes.headers);
-              hRes.end(rb);
+              const rawBuf  = Buffer.concat(chunks);
+              const enc     = pRes.headers['content-encoding'] || '';
+              const bodyStr = decompressBody(rawBuf, enc);
+              const fwdHeaders = { ...pRes.headers };
+              delete fwdHeaders['content-encoding'];
+              rd.response = { status:pRes.statusCode, headers:pRes.headers, body:bodyStr };
+              bcast({ type:'proxy_response', request:{ ...rd, response:{ ...rd.response, body:bodyStr.slice(0,800) } } });
+              hRes.writeHead(pRes.statusCode, fwdHeaders);
+              hRes.end(bodyStr);
               resolve();
             });
           });
@@ -268,11 +310,13 @@ function buildProxy(ca) {
 
     tls.on('error', () => { try { sock.destroy(); } catch{} });
 
+    sock.on('error', () => { try { sock.destroy(); } catch{} });
+
     tls.listen(0, '127.0.0.1', () => {
       const ls = net.connect(tls.address().port, '127.0.0.1', () => {
         ls.write(head);
-        sock.pipe(ls);
-        ls.pipe(sock);
+        sock.pipe(ls).on('error', () => { try { ls.destroy(); } catch{} });
+        ls.pipe(sock).on('error', () => { try { sock.destroy(); } catch{} });
       });
       ls.on('error', () => { try { sock.destroy(); } catch{} });
     });

@@ -39,8 +39,11 @@ yarn-debug.log*
 yarn-error.log*
 electron-log*
 
-# IDE
+# macOS metadata (._* resource fork files)
+._*
 .DS_Store
+
+# IDE
 .idea/
 .vscode/
 *.swp

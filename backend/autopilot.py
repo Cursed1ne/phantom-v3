@@ -26,6 +26,147 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urldefrag, urlparse
 
 import httpx
+import random
+
+# ── Stealth browser fingerprint ───────────────────────────────────────────────
+# Real Chrome 131 UA — avoids HeadlessChrome detection by WAFs/PerimeterX/DataDome
+_STEALTH_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+# JS init script injected before any page JS runs — hides all automation markers
+_STEALTH_INIT_SCRIPT = """
+// 1. Hide webdriver flag
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+// 2. Fake real plugins
+Object.defineProperty(navigator, 'plugins', { get: () => [
+    { name: 'Chrome PDF Plugin',  filename: 'internal-pdf-viewer', description: '' },
+    { name: 'Chrome PDF Viewer',  filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+    { name: 'Native Client',      filename: 'internal-nacl-plugin', description: '' },
+]});
+
+// 3. Fake languages
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+
+// 4. Add chrome runtime object (headless Chrome lacks this)
+window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){}, app: {} };
+
+// 5. Fix permissions API (headless returns wrong state)
+const _origQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (p) =>
+    p.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : _origQuery(p);
+
+// 6. Fix iframe contentWindow
+HTMLIFrameElement.prototype.__defineGetter__('contentWindow', function() {
+    return window;
+});
+"""
+
+_LAUNCH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-infobars",
+    "--disable-notifications",
+    "--window-size=1280,800",
+    "--disable-extensions",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+]
+
+OLLAMA_URL = "http://localhost:11434"
+
+
+async def _ask_llm_what_to_test(page_summary: str, url: str, model: str = "llama3.1") -> List[str]:
+    """
+    Ask the local LLM to look at a page and return a list of security test actions.
+    Returns plain-English actions like: ['click "Sign In" button', 'fill email field with test@test.com']
+    """
+    prompt = f"""You are an expert penetration tester. You are looking at this web page:
+URL: {url}
+
+Page content summary:
+{page_summary[:1500]}
+
+List 3-5 specific security test actions to perform on this page.
+Focus on: auth bypass, injection points, sensitive data exposure, broken access control.
+Format: one action per line, start each with ACTION:
+Only output the ACTION: lines, nothing else."""
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={"model": model, "prompt": prompt, "stream": False},
+            )
+            if resp.status_code == 200:
+                text = resp.json().get("response", "")
+                actions = [
+                    line.replace("ACTION:", "").strip()
+                    for line in text.splitlines()
+                    if line.strip().startswith("ACTION:")
+                ]
+                return actions[:5]
+    except Exception:
+        pass
+    return []
+
+
+async def _llm_interact_page(page: Any, actions: List[str]) -> List[str]:
+    """
+    Execute LLM-suggested actions on the page.
+    Returns a log of what was done.
+    """
+    done = []
+    for action in actions:
+        a = action.lower()
+        try:
+            # Click buttons / links
+            if "click" in a:
+                # extract quoted text
+                m = re.search(r'["\']([^"\']+)["\']', action)
+                if m:
+                    text = m.group(1)
+                    el = await page.query_selector(
+                        f"button:has-text('{text}'), a:has-text('{text}'), "
+                        f"[aria-label*='{text}' i], [title*='{text}' i]"
+                    )
+                    if el:
+                        await el.click()
+                        await page.wait_for_timeout(random.randint(500, 1200))
+                        done.append(f"clicked: {text}")
+
+            # Fill input fields
+            elif "fill" in a or "enter" in a or "type" in a:
+                m_field = re.search(r'(email|username|user|password|search|query|name)', a)
+                m_val   = re.search(r'with\s+([^\s,]+)', a)
+                if m_field and m_val:
+                    field_kw = m_field.group(1)
+                    value    = m_val.group(1).strip("'\"")
+                    sel = f"input[name*='{field_kw}' i], input[id*='{field_kw}' i], input[type='{field_kw}']"
+                    el = await page.query_selector(sel)
+                    if el:
+                        await el.fill(value)
+                        await page.wait_for_timeout(random.randint(200, 600))
+                        done.append(f"filled {field_kw}: {value}")
+
+            # Navigate to path
+            elif "navigate" in a or "visit" in a or "go to" in a:
+                m = re.search(r'["\'/]([a-z0-9/_-]+)', action)
+                if m:
+                    done.append(f"navigate suggestion: {m.group(1)}")
+
+        except Exception:
+            pass
+
+    return done
 
 
 DEFAULT_AUTOPILOT_TOOLS = [
@@ -833,6 +974,7 @@ async def _crawl_playwright(
     login_path: Optional[str],
     register_path: Optional[str],
     workflow_profile: Optional[Dict[str, Any]],
+    on_page_visit=None,          # optional async callback(url, title, status)
 ) -> Dict[str, Any]:
     from playwright.async_api import async_playwright
 
@@ -870,13 +1012,41 @@ async def _crawl_playwright(
         return True
 
     async with async_playwright() as p:
-        launch_kwargs: Dict[str, Any] = {"headless": headless}
+        # ── Stealth launch — no AutomationControlled flag ─────────────────────
+        launch_kwargs: Dict[str, Any] = {
+            "headless": headless,
+            "args": _LAUNCH_ARGS,
+        }
         browser = await p.chromium.launch(**launch_kwargs)
-        context_kwargs: Dict[str, Any] = {"ignore_https_errors": True}
+        context_kwargs: Dict[str, Any] = {
+            "ignore_https_errors": True,
+            "user_agent": _STEALTH_UA,
+            "viewport": {"width": 1280, "height": 800},
+            "locale": "en-US",
+            "timezone_id": "America/New_York",
+            "extra_http_headers": {
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"macOS"',
+            },
+        }
         if proxy_server:
             context_kwargs["proxy"] = {"server": proxy_server}
         context = await browser.new_context(**context_kwargs)
+        session_cookies: Dict[str, str] = {}   # filled after successful login
+
+        # ── Inject stealth script before ANY page JS runs ─────────────────────
+        await context.add_init_script(_STEALTH_INIT_SCRIPT)
+
         page = await context.new_page()
+
+        # Human-like mouse movement on first load
+        await page.mouse.move(
+            random.randint(100, 400),
+            random.randint(100, 400),
+        )
 
         def req_post_data(req) -> str:
             try:
@@ -942,8 +1112,12 @@ async def _crawl_playwright(
                     el = await page.query_selector(sel)
                     if not el:
                         continue
+                    await el.click()
+                    await page.wait_for_timeout(random.randint(80, 200))
                     await el.fill("")
-                    await el.fill(value)
+                    # Type character by character like a human
+                    for ch in value:
+                        await el.type(ch, delay=random.randint(30, 90))
                     return True
                 except Exception:
                     continue
@@ -1080,6 +1254,12 @@ async def _crawl_playwright(
                 if await try_login(lu):
                     login_success = True
                     active_login_url = lu
+                    # Capture browser session cookies for authenticated attack phase
+                    try:
+                        raw = await context.cookies()
+                        session_cookies = {c["name"]: c["value"] for c in raw}
+                    except Exception:
+                        pass
                     break
             except Exception as e:
                 errors.append(f"login error at {lu}: {e}")
@@ -1118,9 +1298,41 @@ async def _crawl_playwright(
                     html = await page.content()
                     lhtml = html.lower()
 
+            # ── Human-like scroll + random delay ─────────────────────────────
+            await page.wait_for_timeout(random.randint(400, 1100))
+            try:
+                await page.mouse.wheel(0, random.randint(200, 600))
+                await page.wait_for_timeout(random.randint(200, 500))
+            except Exception:
+                pass
+
             visited.append(in_scope)
             title = (await page.title())[:140]
             pages.append({"url": in_scope, "title": title, "status": 200})
+
+            # ── Stream page visit to UI in real-time ──────────────────────────
+            if on_page_visit:
+                try:
+                    await on_page_visit(in_scope, title, 200)
+                except Exception:
+                    pass
+
+            # ── LLM-driven page analysis — AI decides what to test ────────────
+            try:
+                page_text = await page.eval_on_selector_all(
+                    "h1,h2,h3,label,button,a,input,form",
+                    "els => els.slice(0,60).map(e => e.innerText || e.getAttribute('placeholder') || e.getAttribute('name') || '').filter(Boolean)"
+                )
+                page_summary = f"Title: {title}\nURL: {in_scope}\nElements: {', '.join(page_text[:40])}"
+                llm_actions = await _ask_llm_what_to_test(page_summary, in_scope)
+                if llm_actions:
+                    interaction_log = await _llm_interact_page(page, llm_actions)
+                    if interaction_log:
+                        # Refresh HTML after LLM interactions
+                        html = await page.content()
+                        lhtml = html.lower()
+            except Exception:
+                pass
 
             try:
                 hrefs = await page.eval_on_selector_all("a[href]", "els => els.map(e => e.getAttribute('href') || '')")
@@ -1312,6 +1524,7 @@ async def _crawl_playwright(
             "password": password,
         },
         "errors": errors[:200],
+        "session_cookies": session_cookies,
     }
 
 
@@ -1453,7 +1666,191 @@ async def _searchsploit_for_hints(hints: List[Dict[str, str]], timeout_s: int) -
     return runs
 
 
-async def run_autopilot_scan(config: Dict[str, Any]) -> Dict[str, Any]:
+async def _probe_api_specs(base_url: str) -> Dict[str, Any]:
+    """Probe for OpenAPI/Swagger/GraphQL specification files after crawl phase."""
+    SPEC_PATHS = [
+        "/openapi.json", "/openapi.yaml",
+        "/swagger.json", "/swagger.yaml",
+        "/swagger/v1/swagger.json",
+        "/api-docs", "/api-docs/swagger.json",
+        "/api/v1/openapi.json", "/api/v2/openapi.json",
+        "/v1/openapi.json", "/v2/openapi.json",
+        "/docs/openapi.json",
+        "/api/swagger.json", "/api/swagger.yaml",
+    ]
+    GRAPHQL_PATHS = ["/graphql", "/api/graphql", "/gql", "/query"]
+
+    found_specs: List[Dict] = []
+    api_endpoints: List[str] = []
+
+    try:
+        async with httpx.AsyncClient(verify=False, follow_redirects=True, timeout=6) as client:
+            # Probe OpenAPI/Swagger paths
+            for path in SPEC_PATHS:
+                try:
+                    r = await client.get(base_url + path, timeout=5)
+                    ct = r.headers.get("content-type", "")
+                    if r.status_code == 200 and (
+                        "paths" in r.text or "swagger" in r.text.lower() or
+                        "openapi" in r.text.lower()
+                    ) and ("json" in ct or "yaml" in ct or "text" in ct or len(r.text) < 200000):
+                        try:
+                            spec = r.json()
+                            paths = list(spec.get("paths", {}).keys())
+                            found_specs.append({
+                                "url": base_url + path,
+                                "type": "openapi",
+                                "endpoints": paths[:60],
+                                "version": spec.get("openapi") or spec.get("swagger") or "unknown",
+                            })
+                            api_endpoints.extend(paths)
+                        except Exception:
+                            # YAML or malformed JSON — still record the URL
+                            found_specs.append({"url": base_url + path, "type": "swagger_yaml"})
+                except Exception:
+                    pass
+
+            # Probe GraphQL introspection
+            for path in GRAPHQL_PATHS:
+                try:
+                    r = await client.post(
+                        base_url + path,
+                        json={"query": "{ __schema { types { name } } }"},
+                        headers={"Content-Type": "application/json"},
+                        timeout=5,
+                    )
+                    if r.status_code == 200 and "data" in r.text and "__schema" in r.text:
+                        found_specs.append({
+                            "url": base_url + path,
+                            "type": "graphql",
+                            "note": "GraphQL introspection enabled — schema fully exposed",
+                        })
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return {
+        "specs": found_specs,
+        "api_endpoints": list(set(api_endpoints)),
+    }
+
+
+async def _test_oauth_endpoints(base_url: str) -> Dict[str, Any]:
+    """Detect OAuth/OIDC endpoints and probe for common misconfigurations."""
+    OAUTH_PATHS = [
+        "/.well-known/openid-configuration",
+        "/.well-known/oauth-authorization-server",
+        "/oauth/authorize", "/oauth/token",
+        "/oauth2/authorize", "/oauth2/token",
+        "/connect/authorize", "/connect/token",
+        "/auth/oauth2/authorize",
+        "/api/oauth/authorize",
+        "/o/oauth2/auth", "/o/oauth2/token",
+    ]
+
+    discovered: List[str] = []
+    findings: List[Dict] = []
+
+    try:
+        async with httpx.AsyncClient(verify=False, follow_redirects=False, timeout=6) as client:
+            # Discover active OAuth endpoints
+            for path in OAUTH_PATHS:
+                try:
+                    r = await client.get(base_url + path, timeout=5)
+                    if r.status_code in (200, 302, 400, 401):
+                        # 400/401 with OAuth error messages confirm endpoint exists
+                        body_lower = r.text.lower()
+                        if r.status_code in (200, 302) or any(
+                            kw in body_lower for kw in ("invalid_client", "unauthorized_client",
+                                                         "oauth", "openid", "authorization")
+                        ):
+                            discovered.append(base_url + path)
+                except Exception:
+                    pass
+
+            # Test discovered authorization endpoints
+            for ep in discovered:
+                if "authorize" not in ep and "auth" not in ep:
+                    continue
+
+                # Test 1: Open redirect via unvalidated redirect_uri
+                try:
+                    r = await client.get(
+                        ep,
+                        params={
+                            "client_id": "phantom_test",
+                            "redirect_uri": "http://evil-phantom-test.invalid/callback",
+                            "response_type": "code",
+                        },
+                        timeout=5,
+                    )
+                    loc = r.headers.get("location", "")
+                    if r.status_code == 302 and "evil-phantom-test.invalid" in loc:
+                        findings.append({
+                            "severity": "HIGH",
+                            "description": f"OAuth Open Redirect: redirect_uri not validated at {ep}. "
+                                           f"Attacker can steal auth codes by pointing redirect to their server.",
+                            "tool": "oauth_probe",
+                            "cvss": "7.4",
+                        })
+                except Exception:
+                    pass
+
+                # Test 2: Missing CSRF state parameter
+                try:
+                    r2 = await client.get(
+                        ep,
+                        params={
+                            "client_id": "phantom_test",
+                            "redirect_uri": base_url + "/callback",
+                            "response_type": "code",
+                        },
+                        timeout=5,
+                    )
+                    loc2 = r2.headers.get("location", "")
+                    if r2.status_code == 302 and loc2 and "state=" not in loc2:
+                        findings.append({
+                            "severity": "MEDIUM",
+                            "description": f"OAuth Missing State Parameter (CSRF): Authorization endpoint "
+                                           f"at {ep} does not include state in redirect. CSRF attack possible.",
+                            "tool": "oauth_probe",
+                            "cvss": "5.4",
+                        })
+                except Exception:
+                    pass
+
+                # Test 3: Implicit flow (token in URL — legacy, insecure)
+                try:
+                    r3 = await client.get(
+                        ep,
+                        params={
+                            "client_id": "phantom_test",
+                            "redirect_uri": base_url + "/callback",
+                            "response_type": "token",
+                        },
+                        timeout=5,
+                    )
+                    if r3.status_code in (200, 302) and "error" not in r3.text.lower():
+                        findings.append({
+                            "severity": "LOW",
+                            "description": f"OAuth Implicit Flow Allowed at {ep}: "
+                                           f"response_type=token accepted. Implicit flow exposes tokens in URL.",
+                            "tool": "oauth_probe",
+                            "cvss": "4.3",
+                        })
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return {"oauth_endpoints": discovered, "findings": findings}
+
+
+async def run_autopilot_scan(
+    config: Dict[str, Any],
+    broadcast_fn=None,           # optional async callable(dict) — streams live progress to UI
+) -> Dict[str, Any]:
     started = time.time()
     started_at = _now_iso()
     base_url, host, scheme = _normalize_target(str(config.get("target") or ""))
@@ -1486,12 +1883,27 @@ async def run_autopilot_scan(config: Dict[str, Any]) -> Dict[str, Any]:
     deps = inspect_dependencies()
     logs: List[str] = []
     manual_findings: List[Dict[str, str]] = []
+
+    # ── Live progress broadcaster ─────────────────────────────────────────────
+    async def push(msg: str, event_type: str = "autopilot_log"):
+        logs.append(msg)
+        if broadcast_fn:
+            try:
+                await broadcast_fn({"type": event_type, "message": msg, "target": base_url})
+            except Exception:
+                pass
+
     if captured_traffic:
-        logs.append(f"proxy-history: loaded {len(captured_traffic)} captured requests")
+        await push(f"proxy-history: loaded {len(captured_traffic)} captured requests")
+
+    # ── Page visit broadcaster for Playwright ────────────────────────────────
+    async def on_page_visit(url: str, title: str, status: int):
+        msg = f"🌐 browser → {url} [{status}] {title[:60]}"
+        await push(msg, event_type="browser_visit")
 
     crawler_result: Dict[str, Any]
     if deps["python_modules"].get("playwright"):
-        logs.append("crawler: playwright enabled")
+        await push("🚀 Launching browser (stealth Chrome)...", "browser_start")
         try:
             crawler_result = await _crawl_playwright(
                 base_url=base_url,
@@ -1506,9 +1918,17 @@ async def run_autopilot_scan(config: Dict[str, Any]) -> Dict[str, Any]:
                 login_path=login_path,
                 register_path=register_path,
                 workflow_profile=workflow_profile,
+                on_page_visit=on_page_visit,
+            )
+            pages_crawled = len(crawler_result.get("pages", []))
+            auth_ok = crawler_result.get("login_success") or crawler_result.get("register_success")
+            await push(
+                f"✅ Browser crawl done — {pages_crawled} pages visited"
+                + (" | ✓ Auth succeeded" if auth_ok else " | ✗ Auth not attempted/failed"),
+                "browser_done"
             )
         except Exception as e:
-            logs.append(f"crawler: playwright failed, falling back to httpx ({e})")
+            await push(f"⚠ Browser crawler failed, falling back to HTTP ({e})", "browser_error")
             manual_findings.append({
                 "severity": "MEDIUM",
                 "description": f"Playwright crawler failed, fallback crawler used: {e}",
@@ -1527,7 +1947,7 @@ async def run_autopilot_scan(config: Dict[str, Any]) -> Dict[str, Any]:
                 workflow_profile=workflow_profile,
             )
     else:
-        logs.append("crawler: playwright not installed, using httpx fallback")
+        await push("⚠ Playwright not installed — using HTTP fallback crawler (no JS, no forms)", "browser_error")
         manual_findings.append({
             "severity": "MEDIUM",
             "description": "Playwright not installed; using HTTP crawler fallback with limited form interaction.",
@@ -1547,6 +1967,25 @@ async def run_autopilot_scan(config: Dict[str, Any]) -> Dict[str, Any]:
             )
 
     crawler_result["traffic_log"] = _merge_traffic_logs(captured_traffic, crawler_result.get("traffic_log") or [], limit=2200)
+
+    # ── Active Injection Attack Phase ─────────────────────────────────────────
+    try:
+        from attacker import run_attack_phase  # noqa: PLC0415
+        session_cookies = crawler_result.get("session_cookies") or {}
+        await push("⚔️  Starting active attack phase (SQLi / XSS / SSTI / LFI / CMDi / SSRF / IDOR)…", "attack_start")
+        attack_findings = await run_attack_phase(
+            crawl_result=crawler_result,
+            base_url=base_url,
+            host=host,
+            session_cookies=session_cookies,
+            broadcast_fn=push,
+            timeout_per_tool=timeout_per_tool,
+        )
+        manual_findings.extend(attack_findings)
+        await push(f"⚔️  Attack phase done — {len(attack_findings)} finding(s)", "attack_done")
+    except Exception as _att_err:
+        await push(f"⚠ Attack phase error: {_att_err}", "attack_error")
+
     traffic_urls = [str(t.get("url") or "") for t in (crawler_result.get("traffic_log") or []) if str(t.get("url") or "")]
     form_urls = [str(x.get("url") or "") for x in (crawler_result.get("form_endpoints") or []) if str(x.get("url") or "")]
     discovered_urls = _dedupe(
@@ -1565,6 +2004,46 @@ async def run_autopilot_scan(config: Dict[str, Any]) -> Dict[str, Any]:
     if js_audit and js_urls:
         logs.append(f"js-audit: analyzing {min(len(js_urls), 30)} script files")
         js_result = await _analyze_js(js_urls, timeout_s=15, max_files=30)
+
+    # ── API Specification Discovery (OpenAPI/Swagger/GraphQL) ─────────────────
+    logs.append("api-probe: probing for OpenAPI/Swagger/GraphQL specs")
+    api_spec_result = await _probe_api_specs(base_url)
+    if api_spec_result["specs"]:
+        logs.append(f"api-probe: found {len(api_spec_result['specs'])} spec(s): "
+                    f"{[s['url'] for s in api_spec_result['specs']]}")
+        # Inject discovered API endpoints into the discovered_urls pool
+        discovered_urls = _dedupe(
+            discovered_urls + [base_url + ep for ep in api_spec_result["api_endpoints"] if ep.startswith("/")],
+            1400,
+        )
+        for spec in api_spec_result["specs"]:
+            stype = spec.get("type", "openapi")
+            desc = f"API spec exposed at {spec['url']}"
+            if stype == "graphql":
+                desc = f"GraphQL introspection enabled at {spec['url']}: full schema accessible to attackers."
+                sev = "MEDIUM"
+                cvss = "5.3"
+            else:
+                ep_count = len(spec.get("endpoints", []))
+                desc = (f"OpenAPI/Swagger spec exposed at {spec['url']}: "
+                        f"{ep_count} endpoint(s) disclosed. Aids attacker enumeration.")
+                sev = "LOW"
+                cvss = "4.3"
+            manual_findings.append({
+                "severity": sev,
+                "description": desc,
+                "tool": "api_probe",
+                "cvss": cvss,
+            })
+
+    # ── OAuth / SSO Endpoint Detection & Testing ──────────────────────────────
+    logs.append("oauth-probe: detecting OAuth/OIDC endpoints")
+    oauth_result = await _test_oauth_endpoints(base_url)
+    if oauth_result["oauth_endpoints"]:
+        logs.append(f"oauth-probe: found endpoints: {oauth_result['oauth_endpoints']}")
+    manual_findings.extend(oauth_result["findings"])
+    if oauth_result["findings"]:
+        logs.append(f"oauth-probe: {len(oauth_result['findings'])} finding(s)")
 
     plan, temp_files = _build_tool_plan(
         base_url=base_url,
@@ -1641,6 +2120,8 @@ async def run_autopilot_scan(config: Dict[str, Any]) -> Dict[str, Any]:
         "dependencies": deps,
         "crawler": crawler_result,
         "js_audit": js_result,
+        "api_specs": api_spec_result,
+        "oauth": oauth_result,
         "tool_runs": tool_runs,
         "technology_hints": tech_hints,
         "manual_findings": manual_findings,
@@ -1648,7 +2129,9 @@ async def run_autopilot_scan(config: Dict[str, Any]) -> Dict[str, Any]:
         "logs": logs[:400],
         "summary": {
             "urls_discovered": len(discovered_urls),
-            "api_endpoints": len(crawler_result.get("api_endpoints") or []),
+            "api_endpoints": len(crawler_result.get("api_endpoints") or []) + len(api_spec_result.get("api_endpoints") or []),
+            "api_specs_found": len(api_spec_result.get("specs") or []),
+            "oauth_endpoints": len(oauth_result.get("oauth_endpoints") or []),
             "js_files": len(js_urls),
             "http_traffic_events": len(traffic_log),
             "form_endpoints": len(crawler_result.get("form_endpoints") or []),

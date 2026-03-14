@@ -5,7 +5,8 @@
       "name": "React UI",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "react"],
-      "port": 3000
+      "port": 3000,
+      "autoPort": true
     },
     {
       "name": "FastAPI Backend",

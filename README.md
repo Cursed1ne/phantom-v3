@@ -1,51 +1,164 @@
-# ⬡ PHANTOM AI v3
-## Enterprise Autonomous Penetration Testing Platform
+# ⬡ Phantom AI v3
 
-> Self-driving red team assessment — 7 agents, 30+ tools, 4-layer memory, local LLM.
+> **Autonomous AI-Powered Penetration Testing Platform**
+
+<p align="center">
+  <img src="https://img.shields.io/badge/version-3.0.0-blue?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/AI-Autonomous%20Pentest-red?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/license-Proprietary-orange?style=for-the-badge" />
+</p>
 
 ---
 
-## What it is
+## Patent & Intellectual Property Notice
 
-PHANTOM AI v3 is a fully autonomous penetration testing platform that runs security assessments without human intervention. It combines 7 specialised AI agents (each powered by a local Ollama LLM), over 30 integrated security tools, a 4-layer data/memory system, and an Electron desktop app with a real-time dark-cyberpunk UI.
+**PATENT PENDING**
 
-**Target audience:** Security engineers, red teamers, pentest labs, and anyone who wants automated, AI-driven vulnerability discovery on authorised targets.
+This software and the novel methodologies embedded within it — including but not limited to the **SPECTRA**, **RIFT**, and **MIMIC** autonomous security testing frameworks — are the subject of a patent application filed by:
+
+**Doshan**
+Inventor & Architect — Phantom AI v3
+
+> *All rights reserved. Unauthorized reproduction, distribution, or reverse engineering of the core AI agent architecture is strictly prohibited.*
+
+---
+
+## What is Phantom AI?
+
+Phantom AI v3 is a **fully autonomous penetration testing platform** that combines AI-driven crawling, active exploitation, and three patented novel security analysis modules into a single desktop application powered by a local LLM (Ollama — 100% private, no data leaves your machine).
+
+---
+
+## Three Patented Innovations
+
+| Module | What It Solves | Why It's Novel |
+|--------|---------------|----------------|
+| **SPECTRA** — Semantic Policy Extractor & Constraint Tester | Finds business logic vulnerabilities that no scanner can find | First tool to use an LLM to *read* an app's rules and *test* their enforcement |
+| **RIFT** — Race Condition & Temporal Vulnerability Finder | Automatically detects race conditions and timing side-channels | First autonomous race condition finder using semantic endpoint classification + concurrent burst testing |
+| **MIMIC** — Multi-Identity Cross-User Authorization Tester | Automatically finds IDOR and broken object-level authorization | First tool to autonomously register a second identity and systematically test cross-user access |
+
+---
+
+## Unique Capabilities vs. Competitors
+
+| Feature | Phantom AI v3 | Burp Suite Pro | Metasploit | OWASP ZAP |
+|---------|:-------------:|:--------------:|:----------:|:---------:|
+| Fully autonomous (zero human input after start) | ✅ | ❌ | ❌ | ❌ |
+| Business logic constraint testing | ✅ | ❌ | ❌ | ❌ |
+| Autonomous race condition detection | ✅ | ⚠️ manual | ❌ | ❌ |
+| Cross-user IDOR auto-testing | ✅ | ❌ | ❌ | ❌ |
+| On-device continuous learning | ✅ | ❌ | ❌ | ❌ |
+| Natural language control | ✅ | ❌ | ❌ | ❌ |
+| Kill-chain graph visualization | ✅ | ❌ | ⚠️ partial | ❌ |
+| Login/signup automation | ✅ | ⚠️ partial | ❌ | ❌ |
+| Post-exploitation chaining | ✅ | ❌ | ✅ | ❌ |
+| 100% local / air-gapped | ✅ | ❌ | ❌ | ❌ |
+
+---
+
+## Quick Start
+
+### macOS / Linux — One Command
+
+```bash
+git clone https://github.com/Cursed1ne/phantom-v3.git
+cd phantom-v3
+chmod +x run.sh
+./run.sh
+```
+
+`run.sh` automatically installs all missing dependencies (nmap, nuclei, sqlmap, nikto, ffuf) and launches the full platform.
+
+### Windows — One Command
+
+```batch
+git clone https://github.com/Cursed1ne/phantom-v3.git
+cd phantom-v3
+run.bat
+```
+
+For a full first-time setup with automatic dependency installation:
+
+```powershell
+# Run as Administrator
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\setup.ps1
+```
+
+---
+
+## Prerequisites
+
+| Dependency | Notes |
+|------------|-------|
+| [Ollama](https://ollama.ai) | Local LLM — download and run before starting |
+| Python 3.10+ | `brew install python` / `winget install Python.Python.3` |
+| Node.js 18+ | `brew install node` / `winget install OpenJS.NodeJS` |
+| nmap | Auto-installed by run scripts |
+| nuclei | Auto-installed by run scripts |
+| sqlmap | Auto-installed by run scripts |
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Electron Desktop App (arm64 + x64 DMG)                     │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │  React UI (12 views · Recharts · SVG attack graph)     │ │
-│  └───────────────────┬─────────────────────────────────────┘ │
-│                      │ IPC / WebSocket                        │
-│  ┌───────────────────▼─────────────────────────────────────┐ │
-│  │  Electron Main (HTTPS MITM Proxy :8888 · WS :8001)     │ │
-│  └─────────────────────────────────────────────────────────┘ │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ REST
-┌──────────────────────▼──────────────────────────────────────┐
-│  FastAPI Backend :8000                                       │
-│  ┌──────────┬──────────┬──────────┬──────────┬──────────┐  │
-│  │ Planner  │  Recon   │   Web    │ Identity │ Network  │  │
-│  │  Agent   │  Agent   │  Agent   │  Agent   │  Agent   │  │
-│  ├──────────┴──────────┴──────────┴──────────┤  Cloud   │  │
-│  │              Exploit Agent                │  Agent   │  │
-│  └───────────────────────────────────────────┴──────────┘  │
-│                                                              │
-│  ┌────────┐ ┌────────┐ ┌────────┐ ┌──────────────────────┐ │
-│  │ Redis  │ │ Neo4j  │ │Chroma  │ │    PostgreSQL         │ │
-│  │:6379   │ │:7474   │ │:8010   │ │    :5432             │ │
-│  │State   │ │Graph   │ │Vectors │ │    Findings          │ │
-│  └────────┘ └────────┘ └────────┘ └──────────────────────┘ │
-└──────────────────────────────────────────────────────────────┘
-                       │
-┌──────────────────────▼──────────────────────────────────────┐
-│  Ollama :11434  (llama3.1 / mistral / any local model)      │
-└─────────────────────────────────────────────────────────────┘
+User (natural language or URL)
+         │
+         ▼
+  ┌──────────────────┐
+  │   Autopilot      │  ← Master AI orchestrator
+  └──────┬───────────┘
+         │
+    ┌────▼────┐
+    │ Crawler │  ← Playwright browser automation
+    │         │    Login / signup / session capture
+    └────┬────┘
+         │
+    ┌────▼────────┐
+    │  Attacker   │  ← SQLi · XSS · LFI · SSTI · CMDi · SSRF
+    │             │    Post-exploitation chaining
+    └────┬────────┘
+         │
+    ┌────▼────┐  ┌──────┐  ┌───────┐
+    │ SPECTRA │  │ RIFT │  │ MIMIC │   ← Three novel patented modules
+    └────┬────┘  └──┬───┘  └───┬───┘
+         └──────────┴──────────┘
+                    │
+    ┌───────────────▼────────────┐
+    │  Kill-Chain Graph Builder  │  ← Visual attack path
+    └───────────────┬────────────┘
+                    │
+    ┌───────────────▼────────────┐
+    │  Report Generator          │  ← CVSS-scored findings
+    └────────────────────────────┘
+```
+
+---
+
+## File Structure
+
+```
+phantom-v3/
+├── backend/
+│   ├── main.py              ← FastAPI REST + WebSocket API
+│   ├── autopilot.py         ← Master orchestrator
+│   ├── attacker.py          ← Active exploitation engine
+│   ├── spectra.py           ← [PATENT PENDING] Business constraint tester
+│   ├── rift.py              ← [PATENT PENDING] Race condition finder
+│   ├── mimic.py             ← [PATENT PENDING] Cross-user IDOR tester
+│   ├── persistent_chat.py   ← LLM chat with memory + tool routing
+│   ├── graph_builder.py     ← Kill-chain graph construction
+│   ├── trainer.py           ← Continuous learning engine
+│   └── agents/              ← Modular agent plugins
+├── src/
+│   └── App.jsx              ← React UI
+├── electron/
+│   └── main.js              ← Electron main process
+├── run.sh                   ← macOS/Linux one-command launcher
+├── run.bat                  ← Windows one-command launcher
+└── setup.ps1                ← Windows full setup script
 ```
 
 ---
@@ -54,193 +167,47 @@ PHANTOM AI v3 is a fully autonomous penetration testing platform that runs secur
 
 | Agent | Role | Key Tools |
 |-------|------|-----------|
-| 🧩 **Planner** | Master strategist — builds attack plan, delegates to specialists | nmap, whatweb, curl |
-| 🔭 **Recon** | Asset discovery, OSINT, subdomain enumeration | subfinder, amass, theHarvester |
-| 🌐 **Web** | OWASP Top 10, injection, directory brute-force | nuclei, nikto, sqlmap, gobuster, ffuf |
-| 🔐 **Identity** | Auth/SSO/JWT/OAuth/SAML testing | jwt_tool, hydra, curl |
-| 🗺 **Network** | Port scanning, SMB, service enumeration | nmap, masscan, smbmap, enum4linux |
-| ☁ **Cloud** | AWS/GCP/Azure posture, Kubernetes | ScoutSuite, prowler, kube-hunter, pacu |
-| 💥 **Exploit** | CVE research, hash cracking, blast radius | searchsploit, hashcat, john |
-
-**Execution order:**
-1. Planner runs first (sets strategy)
-2. Specialist agents run in parallel batches of 3
-3. Exploit analyst runs last to validate everything
-
----
-
-## Prerequisites
-
-- **macOS** (M1/M2/M3/M4 or Intel) — Windows build also supported
-- **Node.js** 18+ — `brew install node`
-- **Python 3.10+** — `brew install python`
-- **Docker Desktop** — [docker.com](https://docker.com) (for Neo4j/Redis/Chroma/Postgres)
-- **Ollama** — `brew install ollama` then `ollama pull llama3.1`
-
----
-
-## Quick Start
-
-### 1 — Clone / place files
-```bash
-mkdir phantom-v3 && cd phantom-v3
-# copy all project files here (matching the directory structure)
-```
-
-### 2 — One-time setup (installs all tools + wordlists + data services)
-```bash
-chmod +x scripts/setup-tools.sh
-./scripts/setup-tools.sh
-```
-
-### 3 — Start Ollama (local LLM)
-```bash
-ollama serve
-# In another tab:
-ollama pull llama3.1   # recommended — fast and capable
-```
-
-### 4 — Run in development mode (hot reload)
-```bash
-./scripts/dev.sh
-```
-
-### 5 — Build production DMG
-```bash
-./scripts/build-mac.sh
-# Output: dist/Phantom AI-3.0.0.dmg
-```
-
----
-
-## Data Services
-
-Start all 4 data services via Docker:
-```bash
-docker-compose -f docker/docker-compose.yml up -d
-```
-
-| Service | URL | Credentials |
-|---------|-----|-------------|
-| Redis | localhost:6379 | none |
-| Neo4j Browser | localhost:7474 | neo4j / phantom123 |
-| Chroma | localhost:8010 | none |
-| PostgreSQL | localhost:5432 | phantom / phantom |
-
-> If Docker is unavailable, the backend automatically falls back to SQLite — no data services needed for basic operation.
-
----
-
-## HTTPS Proxy Setup
-
-Phantom intercepts HTTPS traffic on **localhost:8888** using a per-host MITM CA.
-
-**macOS setup:**
-1. Open System Settings → Network → your connection → Proxies
-2. Enable HTTP Proxy: `127.0.0.1` port `8888`
-3. In the Phantom app → Settings → click **Install CA Certificate**
-
-The proxy auto-detects: SQL injection, XSS, SSTI, RCE, path traversal, LFI/SSRF, exposed JWT/Bearer tokens, and AWS keys in every request.
-
----
-
-## UI Views
-
-| View | What it shows |
-|------|---------------|
-| **Dashboard** | Live risk score, finding counts, agent grid, Recharts |
-| **Targets** | Add hosts/IPs/CIDRs, credential vault, scope notes |
-| **Agents** | Launch/stop/pause agents, live LLM stream, step-by-step log |
-| **Proxy** | Intercepted requests, flagged traffic, request/response inspector |
-| **Network** | Manual nmap/masscan/smbmap with live output |
-| **Identity** | JWT decoder, OAuth/OIDC checklist, encoder/decoder |
-| **Cloud** | AWS/GCP/Azure posture scan, CIS checklist |
-| **Graph** | SVG attack graph — nodes for target, tools, findings |
-| **Intel** | Learning engine, memory system status, Docker reference |
-| **Findings** | All findings, sortable table, CVSS scores |
-| **Report** | Export: Executive HTML, Technical HTML, SARIF JSON, raw JSON |
-| **Settings** | Ollama config, CA cert management, system info |
-
----
-
-## Report Formats
-
-From the Findings or Report view, export:
-- **Executive Report** — HTML: risk overview, business impact, critical findings
-- **Technical Report** — HTML: full finding table, tool attribution, CVSS
-- **SARIF JSON** — machine-readable, compatible with GitHub Code Scanning, VS Code
-- **Raw JSON** — complete findings array with all metadata
-
----
-
-## Wordlists
-
-The agents use these wordlists automatically when present:
-
-| Path | Size | Use |
-|------|------|-----|
-| `/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt` | 220k lines | Directory brute-force |
-| `/usr/share/wordlists/dirbuster/directory-list-2.3-small.txt` | 87k lines | Quick scans |
-| `/usr/share/wordlists/rockyou.txt` | 14.3M passwords | JWT HMAC cracking, SSH brute-force |
-| `/usr/share/seclists/Discovery/Web-Content/common.txt` | 4.7k lines | Fast recon |
-
-Install via: `brew install wordlist seclists`
-
----
-
-## Resuming After a Crash
-
-This project was built in phases. If the build ever needs to restart:
-```
-Tell Claude: "resume Phase N"
-```
-Where N is the phase number from `PHASE_TRACKER.md`.
+| Planner | Master strategist — builds attack plan, delegates | nmap, whatweb |
+| Recon | Asset discovery, OSINT, subdomain enumeration | subfinder, amass |
+| Web | OWASP Top 10, injection, directory brute-force | nuclei, nikto, sqlmap, ffuf |
+| Identity | Auth/SSO/JWT/OAuth testing | jwt_tool, hydra |
+| Network | Port scanning, SMB, service enumeration | nmap, masscan |
+| Cloud | AWS/GCP/Azure posture, Kubernetes | ScoutSuite, prowler |
+| Exploit | CVE research, post-exploitation, chaining | searchsploit, custom chains |
 
 ---
 
 ## Safety & Ethics
 
-**For authorised testing only.** By using PHANTOM AI you confirm that you have explicit written permission to test all target systems. The platform includes scope enforcement — never test systems outside your defined scope.
+**For authorized testing only.** By using Phantom AI you confirm that you have explicit written permission to test all target systems.
 
-Key guardrails built in:
-- Proof-based validation only (no destructive exploits)
+- All findings are proof-based (no destructive exploits by default)
 - Rate limiting on all automated tools
 - Audit logging of all agent actions
-- Kill switch (Stop All) available at any time
-- SAFE MODE on the Exploit agent — CVE research and hash cracking only
+- Kill switch available at any time
+- 100% local — no data is sent to any external server
 
 ---
 
-## File Structure
+## Report Formats
 
-```
-phantom-v3/
-├── electron/
-│   ├── main.js          # Electron main: HTTPS proxy, IPC, backend launcher
-│   └── preload.js       # Context bridge: exposes phantom API to renderer
-├── src/
-│   ├── App.jsx          # Full React UI (2,473 lines, 12 views)
-│   ├── index.js         # React entry point
-│   └── index.css        # Dark cyberpunk design system
-├── public/
-│   └── index.html       # HTML shell (Google Fonts: Orbitron + JetBrains Mono)
-├── backend/
-│   ├── main.py          # FastAPI server (866 lines)
-│   ├── requirements.txt # Python dependencies
-│   ├── agents/          # 7 agent modules (base + 6 specialists)
-│   └── memory/          # 4 data stores (Redis, Chroma, Neo4j, Postgres)
-├── docker/
-│   ├── docker-compose.yml  # All 4 data services
-│   └── init.sql            # PostgreSQL schema
-├── scripts/
-│   ├── setup-tools.sh   # One-time tool installer
-│   ├── dev.sh           # Hot-reload dev mode
-│   ├── build-mac.sh     # Production DMG builder
-│   └── start-services.sh # Health-check and start all services
-├── package.json         # Electron + React + all deps (pinned versions)
-└── PHASE_TRACKER.md     # Build phase tracker for resuming
-```
+Export results as:
+- **Executive Report** (HTML) — risk overview, business impact, critical findings
+- **Technical Report** (HTML) — full finding table, tool attribution, CVSS scores
+- **SARIF JSON** — compatible with GitHub Code Scanning
+- **Raw JSON** — complete findings with all metadata
 
 ---
 
-*PHANTOM AI v3 · Enterprise Autonomous Pentest Platform · For authorised use only*
+## Author
+
+**Doshan**
+Creator, Inventor & Lead Architect — Phantom AI v3
+
+> *"Security through understanding, not obscurity."*
+
+---
+
+<p align="center">
+  <b>⬡ Phantom AI v3 — Patent Pending &copy; Doshan. All Rights Reserved.</b>
+</p>

@@ -145,6 +145,29 @@ def init_db() -> sqlite3.Connection:
         modelfile_path TEXT,
         created_at    TEXT NOT NULL
     );
+
+    -- Persistent chat sessions (survives WebSocket disconnects / tab switches).
+    -- One row per conversation. context_json stores current_target, session_id, etc.
+    CREATE TABLE IF NOT EXISTS chat_sessions (
+        id           TEXT PRIMARY KEY,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL,
+        model        TEXT DEFAULT 'llama3.1',
+        context_json TEXT DEFAULT '{}'
+    );
+
+    -- Every user/assistant message in every chat session.
+    -- Used to replay history when the client reconnects.
+    CREATE TABLE IF NOT EXISTS chat_messages (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_session_id  TEXT NOT NULL,
+        role             TEXT NOT NULL,        -- user | assistant | tool
+        content          TEXT NOT NULL,
+        event_type       TEXT DEFAULT 'text',  -- text | finding | scan_start | tool_result
+        metadata_json    TEXT DEFAULT '{}',    -- extra data for special events (finding cards, etc.)
+        created_at       TEXT NOT NULL,
+        FOREIGN KEY (chat_session_id) REFERENCES chat_sessions(id)
+    );
     """)
     conn.commit()
 
@@ -156,6 +179,9 @@ def init_db() -> sqlite3.Connection:
         "ALTER TABLE learned ADD COLUMN confidence REAL DEFAULT 0.5",
         "ALTER TABLE learned ADD COLUMN first_seen TEXT",
         "ALTER TABLE findings ADD COLUMN confirmed INTEGER DEFAULT 1",
+        # Chat session migrations (idempotent)
+        "ALTER TABLE chat_sessions ADD COLUMN model TEXT DEFAULT 'llama3.1'",
+        "ALTER TABLE chat_sessions ADD COLUMN context_json TEXT DEFAULT '{}'",
     ]:
         try:
             conn.execute(migration)
@@ -725,6 +751,135 @@ async def tool_stats():
     return [dict(r) for r in rows]
 
 
+# ── Mobile / APK Scanner ──────────────────────────────────────────────
+
+import tempfile as _tempfile
+import shutil as _shutil
+
+_APK_SECRET_PATTERNS = [
+    (r"AIza[0-9A-Za-z\-_]{35}", "Google API Key"),
+    (r"AAAA[A-Za-z0-9_-]{7}:[A-Za-z0-9_-]{140}", "Firebase Server Key"),
+    (r"[0-9]+-[0-9A-Za-z_]{32}\.apps\.googleusercontent\.com", "Google OAuth Client ID"),
+    (r"(?:private|secret|password|passwd|api_key|apikey|access_token|auth_token)"
+     r"\s*[=:]\s*['\"](?!<)[^'\"]{6,}['\"]", "Hardcoded Secret"),
+    (r"https?://[a-zA-Z0-9._-]{4,}/(?:api|v1|v2|v3|rest)/[a-zA-Z0-9/_-]{2,}", "Hardcoded API Endpoint"),
+    (r"android:debuggable=\"true\"", "Debug Mode Enabled"),
+    (r"android:allowBackup=\"true\"", "Backup Allowed (Data Leakage Risk)"),
+    (r"android:exported=\"true\"", "Exported Component (Attack Surface)"),
+    (r"http://[a-zA-Z0-9._-]{4,}/", "Insecure HTTP Endpoint"),
+]
+
+_APK_BINARY_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp3", ".mp4",
+                    ".ogg", ".ttf", ".otf", ".woff", ".dex", ".so", ".jar"}
+
+
+@app.post("/scan/apk")
+async def scan_apk(apk_path: str, session_id: str = ""):
+    """
+    Decompile an Android APK with apktool + jadx and grep for security issues:
+    - Hardcoded secrets / API keys
+    - Insecure HTTP connections
+    - Debug flags, exported components, backup enabled
+    - Hardcoded API endpoints
+    Returns findings as JSON (same schema as other scan findings).
+    """
+    if not apk_path or not os.path.isfile(apk_path):
+        raise HTTPException(status_code=400, detail=f"APK not found: {apk_path}")
+
+    has_apktool = bool(_shutil.which("apktool"))
+    has_jadx = bool(_shutil.which("jadx"))
+
+    if not has_apktool and not has_jadx:
+        return {
+            "ok": False,
+            "error": "Neither apktool nor jadx is installed. Install with: brew install apktool jadx",
+            "findings": [],
+        }
+
+    findings: List[Dict] = []
+    logs: List[str] = []
+
+    with _tempfile.TemporaryDirectory() as tmpdir:
+        # ── apktool decompile ──────────────────────────────────────
+        if has_apktool:
+            try:
+                r = subprocess.run(
+                    ["apktool", "d", apk_path, "-o", os.path.join(tmpdir, "apktool"), "-f"],
+                    timeout=120, capture_output=True, text=True,
+                )
+                logs.append(f"apktool: {'ok' if r.returncode == 0 else r.stderr[:200]}")
+            except Exception as e:
+                logs.append(f"apktool: error — {e}")
+
+        # ── jadx decompile ─────────────────────────────────────────
+        if has_jadx:
+            try:
+                r = subprocess.run(
+                    ["jadx", "-d", os.path.join(tmpdir, "jadx"), apk_path],
+                    timeout=120, capture_output=True, text=True,
+                )
+                logs.append(f"jadx: {'ok' if r.returncode == 0 else r.stderr[:200]}")
+            except Exception as e:
+                logs.append(f"jadx: error — {e}")
+
+        # ── Secret / vulnerability grep ───────────────────────────
+        seen_findings: set = set()
+        for root, _, files in os.walk(tmpdir):
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in _APK_BINARY_EXTS:
+                    continue
+                fpath = os.path.join(root, fname)
+                rel = os.path.relpath(fpath, tmpdir)
+                try:
+                    content = open(fpath, encoding="utf-8", errors="replace").read()
+                    for pattern, name in _APK_SECRET_PATTERNS:
+                        for m in re.finditer(pattern, content, re.IGNORECASE):
+                            snippet = m.group()[:100].strip()
+                            key = f"{name}|{snippet}"
+                            if key in seen_findings:
+                                continue
+                            seen_findings.add(key)
+                            sev = "HIGH" if name in (
+                                "Google API Key", "Firebase Server Key",
+                                "Hardcoded Secret", "Google OAuth Client ID"
+                            ) else "MEDIUM" if name in (
+                                "Hardcoded API Endpoint", "Debug Mode Enabled", "Insecure HTTP Endpoint"
+                            ) else "LOW"
+                            findings.append({
+                                "severity": sev,
+                                "description": f"Mobile [{name}] in {rel}: {snippet}",
+                                "tool": "apk_scanner",
+                                "cvss": "7.5" if sev == "HIGH" else "5.3" if sev == "MEDIUM" else "3.1",
+                            })
+                except Exception:
+                    pass
+
+    # Persist to DB if session_id provided
+    if session_id and findings:
+        now = datetime.utcnow().isoformat()
+        for f in findings:
+            try:
+                _db.execute(
+                    "INSERT INTO findings (id, session_id, severity, description, agent, tool, cvss, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (str(uuid4()), session_id, f["severity"], f["description"],
+                     "mobile", f["tool"], f.get("cvss", ""), now),
+                )
+            except Exception:
+                pass
+        _db.commit()
+
+    return {
+        "ok": True,
+        "apk_path": apk_path,
+        "tools_used": [t for t, a in [("apktool", has_apktool), ("jadx", has_jadx)] if a],
+        "findings": findings,
+        "finding_count": len(findings),
+        "logs": logs,
+    }
+
+
 # ── Ollama proxy ──────────────────────────────────────────────────────
 
 @app.get("/ollama/models")
@@ -885,7 +1040,11 @@ async def autopilot_run(req: AutopilotRequest):
             payload["workflow_profile_name"] = selected_profile.get("name")
             payload["workflow_profile_id"] = selected_profile.get("id")
 
-        report = await run_autopilot_scan(payload)
+        # Stream live browser/tool progress to all connected WebSocket clients
+        async def _bcast_progress(event: dict):
+            await manager.broadcast(event)
+
+        report = await run_autopilot_scan(payload, broadcast_fn=_bcast_progress)
         tool_runs = report.get("tool_runs", []) or []
 
         findings: List[Dict[str, Any]] = []
@@ -967,6 +1126,46 @@ async def autopilot_run(req: AutopilotRequest):
             "UPDATE sessions SET finished_at=?, status=?, risk_score=? WHERE id=?",
             (datetime.utcnow().isoformat(), "complete", risk_score, session_id)
         )
+
+        # ── Persist findings into learned table so AI remembers them ──────────
+        _now = datetime.utcnow().isoformat()
+        for f in findings:
+            sev = f.get("severity", "INFO")
+            if sev not in ("CRITICAL", "HIGH", "MEDIUM"):
+                continue  # only learn confirmed significant findings
+            tool    = f.get("tool") or "autopilot"
+            desc    = f.get("description") or ""
+            # Pattern = tool + short description signature (de-duped by pattern uniqueness)
+            pattern = f"{tool}:{desc[:80]}"
+            vuln_type = (
+                "SQLi"      if "sql" in tool.lower() or "sqli" in tool.lower() else
+                "XSS"       if "xss" in tool.lower() else
+                "LFI"       if "lfi" in tool.lower() or "traversal" in tool.lower() else
+                "SSTI"      if "ssti" in tool.lower() else
+                "CMDi"      if "cmdi" in tool.lower() or "command" in desc.lower() else
+                "SSRF"      if "ssrf" in tool.lower() else
+                "IDOR"      if "idor" in tool.lower() else
+                "AuthBypass" if "bypass" in tool.lower() or "auth" in tool.lower() else
+                sev
+            )
+            try:
+                existing = _db.execute("SELECT id, seen_count FROM learned WHERE pattern=?", (pattern,)).fetchone()
+                if existing:
+                    new_count = existing["seen_count"] + 1
+                    new_conf  = min(1.0, 0.3 + 0.14 * new_count)
+                    _db.execute(
+                        "UPDATE learned SET seen_count=?, confidence=?, last_seen=?, verified=1 WHERE pattern=?",
+                        (new_count, new_conf, _now, pattern)
+                    )
+                else:
+                    _db.execute(
+                        "INSERT INTO learned (pattern,vuln_type,tech_stack,agent,tool,seen_count,verified,confidence,last_seen,first_seen)"
+                        " VALUES (?,?,?,?,?,1,1,0.6,?,?)",
+                        (pattern, vuln_type, "", "autopilot", tool, _now, _now)
+                    )
+            except Exception:
+                pass
+
         _db.commit()
 
         counts = {sev: 0 for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]}
@@ -1420,46 +1619,107 @@ async def agent_ws(ws: WebSocket):
 
 
 # ════════════════════════════════════════════════════════════════════
-#  CHAT WebSocket — ChatGPT-style conversational AI interface
-#  Stream URL: ws://localhost:8000/ws/chat
-#  Client sends: {"message": "scan https://target.com"}
-#  Server yields: {"type": "token"|"text"|"finding"|"scan_start"|"done", ...}
+#  CHAT WebSocket — Persistent conversational AI interface
+#  Survives tab switches: session ID stored in browser localStorage,
+#  history stored in chat_messages DB table, replayed on reconnect.
+#
+#  Protocol:
+#    Client → server (first message): {"action": "connect", "chat_session_id": "..." | null}
+#    Server → client: {"type": "session_init", "chat_session_id": "..."}
+#    Server → client (reconnect): {"type": "replay_start"} … events … {"type": "replay_done"}
+#    Then: normal message loop
+#      Client → server: {"message": "scan https://target.com"}
+#      Server → client: stream of {type: token|text|finding|scan_start|tool_result|done}
 # ════════════════════════════════════════════════════════════════════
 
 @app.websocket("/ws/chat")
 async def chat_ws(ws: WebSocket):
     """
-    Conversational AI interface. One connection = one chat session.
-    PhantomChatAgent detects intent from natural language and dispatches
-    to the appropriate platform function (scan, train, graph, report, etc.)
-    or streams a direct LLM answer for security questions.
+    Persistent conversational AI interface.
+
+    Each client gets a chat_session_id (stored in their localStorage).
+    On reconnect (tab switch, refresh), the client sends its saved session_id
+    and the server replays all previous messages from the DB — no history loss.
+
+    The PersistentChatAgent uses LLM tool-calling (not regex intent detection):
+    the LLM reads the full conversation and decides when to invoke tools.
     """
-    try:
-        from chat_agent import PhantomChatAgent
-    except ImportError as e:
-        log.error(f"chat_agent import failed: {e}")
-        return
-
     await manager.connect(ws)
-    model = getattr(app.state, "active_model", "llama3.1")
-    agent = PhantomChatAgent(model=model, db=_db)
-
-    # Send welcome banner
-    await ws.send_json({
-        "type": "text",
-        "text": (
-            "**Phantom AI** — conversational pentest assistant\n\n"
-            "Try:\n"
-            "- `scan https://pentest-ground.com:4280/`\n"
-            "- `show vulnerabilities`\n"
-            "- `build exploit graph`\n"
-            "- `model status`\n"
-            "- *or ask any security question*"
-        ),
-    })
-    await ws.send_json({"type": "done"})
-
     try:
+        # ── Step 1: Handshake — get or create session ──────────────────────
+        raw  = await ws.receive_text()
+        init = json.loads(raw)
+        chat_session_id = init.get("chat_session_id")
+        model = getattr(app.state, "active_model", "llama3.1")
+
+        is_new = False
+        if chat_session_id:
+            row = _db.execute(
+                "SELECT id FROM chat_sessions WHERE id=?", (chat_session_id,)
+            ).fetchone()
+            if not row:
+                chat_session_id = None  # stale ID — create fresh
+
+        if not chat_session_id:
+            chat_session_id = str(uuid4())
+            _db.execute(
+                "INSERT INTO chat_sessions (id, created_at, updated_at, model, context_json) "
+                "VALUES (?,?,?,?,?)",
+                (chat_session_id, datetime.utcnow().isoformat(),
+                 datetime.utcnow().isoformat(), model, "{}"),
+            )
+            _db.commit()
+            is_new = True
+
+        # Send session ID to frontend — client saves it in localStorage
+        await ws.send_json({"type": "session_init", "chat_session_id": chat_session_id})
+
+        # ── Step 2: Load or init agent ─────────────────────────────────────
+        try:
+            from persistent_chat import PersistentChatAgent
+        except ImportError as e:
+            log.error(f"persistent_chat import failed: {e}")
+            await ws.send_json({"type": "text",
+                "text": f"[Backend error: persistent_chat not found — {e}]"})
+            return
+
+        agent = PersistentChatAgent(
+            chat_session_id=chat_session_id,
+            model=model,
+            db=_db,
+        )
+
+        # ── Step 3: Replay history OR show welcome ─────────────────────────
+        if not is_new:
+            replay = await agent.get_replay_events()
+            if replay:
+                await ws.send_json({"type": "replay_start", "count": len(replay)})
+                for ev in replay:
+                    await ws.send_json(ev)
+                await ws.send_json({"type": "replay_done"})
+            else:
+                # Session exists but no messages — show welcome anyway
+                is_new = True
+
+        if is_new:
+            await ws.send_json({
+                "type": "text",
+                "text": (
+                    "**Phantom AI ready** 🔴\n\n"
+                    "I'm your autonomous penetration testing assistant. "
+                    "I can scan targets, find vulnerabilities, build exploit chains, and generate reports.\n\n"
+                    "**What to try:**\n"
+                    "- `scan https://pentest-ground.com:4280/`\n"
+                    "- `scan https://target.com` then `show findings`\n"
+                    "- `run nmap against target.com`\n"
+                    "- `what is SQL injection?`\n"
+                    "- `build exploit graph` after a scan\n\n"
+                    f"Active model: `{model}`"
+                ),
+            })
+            await ws.send_json({"type": "done"})
+
+        # ── Step 4: Main message loop ──────────────────────────────────────
         while True:
             raw      = await ws.receive_text()
             data     = json.loads(raw)
@@ -1470,8 +1730,9 @@ async def chat_ws(ws: WebSocket):
             async for event in agent.process(user_msg, backend_url):
                 await ws.send_json(event)
             await ws.send_json({"type": "done"})
+
     except WebSocketDisconnect:
-        log.info("Chat WS client disconnected")
+        log.info(f"Chat WS disconnected (session={chat_session_id[:8] if chat_session_id else '?'})")
     except Exception as e:
         log.error(f"Chat WS error: {e}", exc_info=True)
     finally:
@@ -1479,48 +1740,52 @@ async def chat_ws(ws: WebSocket):
 
 
 class ChatRequest(BaseModel):
-    message: str
-    session_id: Optional[str] = None
+    message:         str
+    chat_session_id: Optional[str] = None
 
 
 @app.post("/chat")
 async def chat_post(req: ChatRequest):
     """
-    Non-streaming chat endpoint for simple integrations (CLI, scripts).
-    Returns the full response after processing.
+    Non-streaming REST chat endpoint for CLI / scripts.
+    Creates or reuses a chat session and returns the full response.
     """
     try:
-        from chat_agent import PhantomChatAgent
+        from persistent_chat import PersistentChatAgent
     except ImportError as e:
-        raise HTTPException(status_code=500, detail=f"chat_agent import failed: {e}")
+        raise HTTPException(status_code=500, detail=f"persistent_chat import failed: {e}")
 
     model = getattr(app.state, "active_model", "llama3.1")
-    agent = PhantomChatAgent(model=model, db=_db)
-    if req.session_id:
-        agent.ctx["session_id"] = req.session_id
+
+    # Create or reuse session
+    chat_session_id = req.chat_session_id
+    if chat_session_id:
+        row = _db.execute("SELECT id FROM chat_sessions WHERE id=?", (chat_session_id,)).fetchone()
+        if not row:
+            chat_session_id = None
+    if not chat_session_id:
+        chat_session_id = str(uuid4())
+        _db.execute(
+            "INSERT INTO chat_sessions (id, created_at, updated_at, model, context_json) VALUES (?,?,?,?,?)",
+            (chat_session_id, datetime.utcnow().isoformat(), datetime.utcnow().isoformat(), model, "{}"),
+        )
+        _db.commit()
+
+    agent = PersistentChatAgent(chat_session_id=chat_session_id, model=model, db=_db)
 
     events: list = []
     async for ev in agent.process(req.message, f"http://localhost:{PORT}"):
         events.append(ev)
 
-    # Collapse tokens into text blocks
-    full_text = ""
-    findings  = []
-    other     = []
-    for ev in events:
-        if ev["type"] == "token":
-            full_text += ev.get("text", "")
-        elif ev["type"] == "text":
-            full_text += ev.get("text", "")
-        elif ev["type"] == "finding":
-            findings.append(ev)
-        else:
-            other.append(ev)
+    full_text = "".join(ev.get("text", "") for ev in events if ev["type"] in ("token", "text"))
+    findings  = [ev for ev in events if ev["type"] == "finding"]
+    other     = [ev for ev in events if ev["type"] not in ("token", "text", "finding")]
 
     return JSONResponse({
-        "response": full_text,
-        "findings": findings,
-        "events":   other,
+        "chat_session_id": chat_session_id,
+        "response":        full_text,
+        "findings":        findings,
+        "events":          other,
     })
 
 
