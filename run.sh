@@ -196,9 +196,18 @@ fi
 # ── 6. Launch app ─────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}  All systems go! Launching Phantom AI...${NC}"
-echo -e "${CYAN}  Model: ${ACTIVE_MODEL}${NC}"
-echo -e "${CYAN}  API:   http://localhost:8000${NC}"
+echo -e "${CYAN}  Model:    ${ACTIVE_MODEL}${NC}"
+echo -e "${CYAN}  Backend:  http://localhost:8000${NC}"
+echo -e "${CYAN}  UI:       http://localhost:3001  (Electron will open this)${NC}"
 echo -e "${CYAN}  Press Ctrl+C to stop everything\n${NC}"
+
+# macOS: remove quarantine from Electron so it doesn't get Gatekeeper-blocked
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    _electron_bin="$ROOT/node_modules/electron/dist/Electron.app"
+    if [ -d "$_electron_bin" ]; then
+        xattr -rd com.apple.quarantine "$_electron_bin" 2>/dev/null || true
+    fi
+fi
 
 # ── Cleanup on exit ───────────────────────────────────────────────────────────
 cleanup() {

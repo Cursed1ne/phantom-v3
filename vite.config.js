@@ -2,11 +2,9 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 
-// https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
 
-  // Serve static assets from public/
   publicDir: 'public',
 
   server: {
@@ -24,14 +22,12 @@ export default defineConfig({
     },
   },
 
-  // Polyfill process.env for Electron preload compatibility
   define: {
     'process.env': JSON.stringify({}),
   },
 
   resolve: {
-    alias: {
-      '@': path.resolve(__dirname, 'src'),
-    },
+    alias: { '@': path.resolve(__dirname, 'src') },
+    extensions: ['.jsx', '.js', '.tsx', '.ts', '.json'],
   },
 });
