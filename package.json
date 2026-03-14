@@ -7,10 +7,10 @@
   "main": "electron/main.js",
   "homepage": "./",
   "scripts": {
-    "react": "PORT=3001 react-scripts start",
-    "build": "GENERATE_SOURCEMAP=false react-scripts build",
+    "react": "vite --port 3001 --host 127.0.0.1",
+    "build": "vite build",
     "electron-dev": "ELECTRON_START_URL=http://localhost:3001 electron .",
-    "start": "concurrently \"npm run react\" \"wait-on http://localhost:3001 && sleep 1 && npm run electron-dev\"",
+    "start": "concurrently \"npm run react\" \"wait-on http://localhost:3001 && sleep 2 && npm run electron-dev\"",
     "dist": "npm run build && electron-builder --mac",
     "dist:win": "npm run build && electron-builder --win",
     "dist:all": "npm run build && electron-builder --mac --win",
@@ -98,13 +98,14 @@
     "ws": "^8.19.0"
   },
   "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.3",
     "concurrently": "8.2.2",
-    "electron": "^0.4.1",
+    "electron": "33.4.0",
     "electron-builder": "^26.8.1",
     "react": "18.2.0",
     "react-dom": "18.2.0",
-    "react-scripts": "^0.0.0",
     "recharts": "2.12.2",
+    "vite": "^5.4.6",
     "wait-on": "7.2.0"
   },
   "eslintConfig": {
