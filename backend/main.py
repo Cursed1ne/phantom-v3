@@ -2124,6 +2124,146 @@ def build_tool_args(tool: str, target: str, depth: str = "standard") -> List[str
 
 
 # ════════════════════════════════════════════════════════════════════
+#  AI EXPLOITATION ENGINE — OWASP LLM Top 10 (2025) + MITRE ATLAS
+#  Patent Pending © Doshan
+# ════════════════════════════════════════════════════════════════════
+
+class AITestRequest(BaseModel):
+    target_url: str
+    api_key: str = ""
+    model: str = ""
+    api_format: str = "auto"   # auto, openai, anthropic, ollama
+    scan_depth: str = "full"   # quick, standard, full
+
+
+@app.post("/ai/scan")
+async def ai_pentest_endpoint(req: AITestRequest):
+    """
+    Run a full AI/LLM penetration test.
+    Tests: Prompt Injection, Model Extraction, RAG Poisoning, Tool Abuse,
+           NEXUS, GHOST, ORACLE (all OWASP LLM Top 10 + MITRE ATLAS)
+    """
+    try:
+        from ai_exploiter.ai_autopilot import run_ai_pentest
+        report = await run_ai_pentest(
+            target_url=req.target_url,
+            api_key=req.api_key,
+            model=req.model,
+            api_format=req.api_format,
+            scan_depth=req.scan_depth,
+        )
+        # Persist findings to database
+        _db = _get_db()
+        try:
+            now = datetime.utcnow().isoformat()
+            for f in report.get("findings", []):
+                sev = f.get("severity", "INFO")
+                _db.execute(
+                    """INSERT INTO findings
+                       (scan_id, target, tool, severity, title, description, raw_output, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        report.get("scan_id", "ai_pentest"),
+                        req.target_url,
+                        f"ai_exploiter:{f.get('type', 'unknown')}",
+                        sev,
+                        f.get("title", ""),
+                        f.get("description", ""),
+                        json.dumps(f),
+                        now,
+                    ),
+                )
+            _db.commit()
+        except Exception as _db_err:
+            log.warning(f"AI pentest DB write error: {_db_err}")
+        finally:
+            _db.close()
+
+        return {"status": "ok", "report": report}
+    except Exception as e:
+        log.error(f"AI pentest error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.websocket("/ws/ai-scan")
+async def ai_scan_ws(websocket: WebSocket):
+    """
+    WebSocket endpoint for streaming AI pentest progress in real time.
+    Client sends: {"target_url": "...", "api_key": "...", "model": "...", "scan_depth": "full"}
+    Server streams: {"type": "event_type", "message": "..."}
+    """
+    await websocket.accept()
+    try:
+        data = await websocket.receive_json()
+        target_url = data.get("target_url", "")
+        api_key = data.get("api_key", "")
+        model = data.get("model", "")
+        api_format = data.get("api_format", "auto")
+        scan_depth = data.get("scan_depth", "full")
+
+        if not target_url:
+            await websocket.send_json({"type": "error", "message": "target_url required"})
+            return
+
+        async def stream(msg: str, etype: str = "ai_pentest"):
+            try:
+                await websocket.send_json({"type": etype, "message": msg})
+            except Exception:
+                pass
+
+        from ai_exploiter.ai_autopilot import run_ai_pentest
+        report = await run_ai_pentest(
+            target_url=target_url,
+            api_key=api_key,
+            model=model,
+            api_format=api_format,
+            scan_depth=scan_depth,
+            broadcast_fn=stream,
+        )
+        await websocket.send_json({"type": "complete", "report": report})
+    except Exception as e:
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+@app.get("/ai/taxonomy")
+async def get_ai_taxonomy():
+    """Return the AI Exploitation Top 10 taxonomy as JSON."""
+    taxonomy = {
+        "version": "1.0",
+        "author": "Doshan",
+        "patent": "Patent Pending",
+        "based_on": ["OWASP LLM Top 10 (2025)", "MITRE ATLAS"],
+        "attacks": [
+            {"id": "AIE-01", "name": "Direct Prompt Injection",         "owasp": "LLM01:2025", "mitre": "AML.T0013", "severity": "CRITICAL", "cvss": "9.8"},
+            {"id": "AIE-02", "name": "Indirect Prompt Injection",        "owasp": "LLM01:2025", "mitre": "AML.T0013", "severity": "CRITICAL", "cvss": "9.6"},
+            {"id": "AIE-03", "name": "System Prompt Extraction",         "owasp": "LLM07:2025", "mitre": "AML.T0024", "severity": "HIGH",     "cvss": "7.5"},
+            {"id": "AIE-04", "name": "Model Extraction (Stealing)",      "owasp": "N/A",        "mitre": "AML.T0016", "severity": "HIGH",     "cvss": "7.3"},
+            {"id": "AIE-05", "name": "Training Data Extraction",         "owasp": "LLM02:2025", "mitre": "AML.T0018", "severity": "HIGH",     "cvss": "7.8"},
+            {"id": "AIE-06", "name": "Membership Inference",             "owasp": "LLM02:2025", "mitre": "AML.T0017", "severity": "MEDIUM",   "cvss": "6.1"},
+            {"id": "AIE-07", "name": "Adversarial Input Attacks",        "owasp": "N/A",        "mitre": "AML.T0015", "severity": "HIGH",     "cvss": "7.2"},
+            {"id": "AIE-08", "name": "RAG/Vector Store Poisoning",       "owasp": "LLM08:2025", "mitre": "AML.T0023", "severity": "CRITICAL", "cvss": "9.1"},
+            {"id": "AIE-09", "name": "Tool/Agent Exploitation",          "owasp": "LLM06:2025", "mitre": "AML.T0013", "severity": "CRITICAL", "cvss": "9.4"},
+            {"id": "AIE-10", "name": "Unbounded Consumption/DoS",        "owasp": "LLM10:2025", "mitre": "AML.T0027", "severity": "MEDIUM",   "cvss": "5.9"},
+            {"id": "AIE-N1", "name": "Token Smuggling [NOVEL]",          "owasp": "LLM01:2025", "mitre": "AML.T0015", "severity": "HIGH",     "cvss": "8.1", "patent": True},
+            {"id": "AIE-N2", "name": "Embedding Inversion [NOVEL]",      "owasp": "LLM08:2025", "mitre": "AML.T0018", "severity": "HIGH",     "cvss": "7.0", "patent": True},
+            {"id": "AIE-N3", "name": "Multi-Modal Injection [NOVEL]",    "owasp": "LLM01:2025", "mitre": "AML.T0013", "severity": "CRITICAL", "cvss": "9.0", "patent": True},
+            {"id": "NEXUS",  "name": "Neural Extraction [PATENT]",       "owasp": "N/A",        "mitre": "AML.T0016", "severity": "HIGH",     "cvss": "7.5", "patent": True},
+            {"id": "GHOST",  "name": "Gradient-free Bypass [PATENT]",    "owasp": "LLM01:2025", "mitre": "AML.T0015", "severity": "CRITICAL", "cvss": "9.4", "patent": True},
+            {"id": "ORACLE", "name": "Confidence Exploitation [PATENT]", "owasp": "LLM02:2025", "mitre": "AML.T0017", "severity": "HIGH",     "cvss": "6.8", "patent": True},
+        ],
+    }
+    return taxonomy
+
+
+# ════════════════════════════════════════════════════════════════════
 #  ENTRY POINT
 # ════════════════════════════════════════════════════════════════════
 
