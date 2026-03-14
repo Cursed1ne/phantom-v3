@@ -1986,6 +1986,57 @@ async def run_autopilot_scan(
     except Exception as _att_err:
         await push(f"⚠ Attack phase error: {_att_err}", "attack_error")
 
+    # ── SPECTRA: Semantic Policy Extractor & Constraint Tester ────────────────
+    try:
+        from spectra import run_spectra  # noqa: PLC0415
+        _spectra_secondary_cookies = crawler_result.get("secondary_session_cookies") or None
+        await push("🧩 SPECTRA: extracting and testing semantic security constraints…", "spectra_start")
+        _spectra_findings = await run_spectra(
+            crawler_result=crawler_result,
+            base_url=base_url,
+            session_cookies=session_cookies,
+            broadcast_fn=broadcast_fn,
+            llm_url=OLLAMA_URL,
+            model="llama3.1",
+            secondary_cookies=_spectra_secondary_cookies,
+        )
+        manual_findings.extend(_spectra_findings)
+        await push(f"🧩 SPECTRA done — {len(_spectra_findings)} finding(s)", "spectra_done")
+    except Exception as _spectra_err:
+        await push(f"⚠ SPECTRA: {_spectra_err}", "spectra_error")
+
+    # ── RIFT: Race Condition & Timing Side-Channel Finder ─────────────────────
+    try:
+        from rift import run_rift  # noqa: PLC0415
+        await push("⚡ RIFT: scanning for race conditions and timing side-channels…", "rift_start")
+        _rift_findings = await run_rift(
+            crawler_result=crawler_result,
+            base_url=base_url,
+            session_cookies=session_cookies,
+            broadcast_fn=broadcast_fn,
+        )
+        manual_findings.extend(_rift_findings)
+        await push(f"⚡ RIFT done — {len(_rift_findings)} finding(s)", "rift_done")
+    except Exception as _rift_err:
+        await push(f"⚠ RIFT: {_rift_err}", "rift_error")
+
+    # ── MIMIC: Multi-Identity Cross-User Authorization Matrix ─────────────────
+    try:
+        from mimic import run_mimic  # noqa: PLC0415
+        await push("👥 MIMIC: creating second identity, testing cross-user authorization…", "mimic_start")
+        _mimic_findings = await run_mimic(
+            crawler_result=crawler_result,
+            base_url=base_url,
+            user_a_cookies=session_cookies,
+            broadcast_fn=broadcast_fn,
+            register_path=register_path,
+            user_a_username=username,
+        )
+        manual_findings.extend(_mimic_findings)
+        await push(f"👥 MIMIC done — {len(_mimic_findings)} finding(s)", "mimic_done")
+    except Exception as _mimic_err:
+        await push(f"⚠ MIMIC: {_mimic_err}", "mimic_error")
+
     traffic_urls = [str(t.get("url") or "") for t in (crawler_result.get("traffic_log") or []) if str(t.get("url") or "")]
     form_urls = [str(x.get("url") or "") for x in (crawler_result.get("form_endpoints") or []) if str(x.get("url") or "")]
     discovered_urls = _dedupe(
