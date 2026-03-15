@@ -113,23 +113,62 @@ def _make_finding(
     description: str,
     url: str = "",
     evidence: str = "",
+    http_evidence: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     sev = severity.upper()
+    base: Dict[str, Any] = {
+        "id":               str(uuid.uuid4()),
+        "severity":         sev,
+        "description":      description[:500],
+        "tool":             "MIMIC",
+        "agent":            "mimic",
+        "module":           "Multi-Identity Cross-User Authorization Matrix",
+        "patent":           "Patent Pending — Doshan",
+        "iteration":        1,
+        "cvss":             _CVSS.get(sev, 1.0),
+        "raw_output":       evidence[:600],
+        "url":              url,
+        "created_at":       time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "owasp":            "A01:2021 – Broken Access Control",
+        "cwe":              "CWE-639",
+        # HTTP evidence defaults
+        "request_method":   "",
+        "request_url":      url,
+        "request_headers":  "{}",
+        "request_body":     "",
+        "response_status":  0,
+        "response_headers": "{}",
+        "response_body":    "",
+        "payload":          "",
+        "timing_ms":        0.0,
+    }
+    if http_evidence:
+        base.update(http_evidence)
+    return base
+
+
+def _capture_http_evidence(
+    resp: "httpx.Response",
+    elapsed: float = 0.0,
+    payload: str = "",
+) -> Dict[str, Any]:
+    try:
+        req_headers  = dict(resp.request.headers)
+        req_body     = resp.request.content.decode("utf-8", errors="replace")[:1500]
+        resp_body    = resp.text[:2000]
+        resp_headers = dict(resp.headers)
+    except Exception:
+        req_headers = {}; req_body = ""; resp_body = ""; resp_headers = {}
     return {
-        "id":          str(uuid.uuid4()),
-        "severity":    sev,
-        "description": description[:500],
-        "tool":        "MIMIC",
-        "agent":       "mimic",
-        "module":      "Multi-Identity Cross-User Authorization Matrix",
-        "patent":      "Patent Pending — Doshan",
-        "iteration":   1,
-        "cvss":        _CVSS.get(sev, 1.0),
-        "raw_output":  evidence[:600],
-        "url":         url,
-        "created_at":  time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "owasp":       "A01:2021 – Broken Access Control",
-        "cwe":         "CWE-639",
+        "request_method":   getattr(resp.request, "method", ""),
+        "request_url":      str(getattr(resp.request, "url", "")),
+        "request_headers":  json.dumps(req_headers, default=str),
+        "request_body":     req_body if isinstance(req_body, str) else "",
+        "response_status":  resp.status_code,
+        "response_headers": json.dumps(resp_headers, default=str),
+        "response_body":    resp_body if isinstance(resp_body, str) else "",
+        "payload":          payload,
+        "timing_ms":        round(elapsed * 1000, 1),
     }
 
 
@@ -373,11 +412,14 @@ async def test_cross_user_access(
 
     for res in resources:
         try:
+            _t0 = time.time()
             if res.method == "GET":
                 resp = await session.get(res.url, cookies=user_b_cookies, timeout=10)
             else:
                 resp = await session.request(res.method, res.url,
                                              cookies=user_b_cookies, timeout=10)
+            _ev = _capture_http_evidence(resp, time.time() - _t0,
+                                         payload=f"User-B access to ID={res.extracted_id}")
 
             if resp.status_code not in range(200, 300):
                 continue
@@ -397,6 +439,7 @@ async def test_cross_user_access(
                 f"{'User A identifier found in response.' if confirmed else ''}",
                 url=res.url,
                 evidence=body[:400],
+                http_evidence=_ev,
             ))
 
         except (httpx.RequestError, asyncio.TimeoutError):
@@ -415,7 +458,9 @@ async def test_unauthenticated_access(
     findings: List[Dict[str, Any]] = []
     for res in resources[:15]:
         try:
+            _t0 = time.time()
             resp = await session.get(res.url, cookies={}, timeout=8)
+            _ev = _capture_http_evidence(resp, time.time() - _t0, payload="no-auth probe")
             if resp.status_code in range(200, 300) and len(resp.content) > _MIN_BODY_FOR_DATA:
                 body = resp.text
                 if not any(kw in body.lower() for kw in ("login", "sign in", "unauthorized", "forbidden")):
@@ -425,6 +470,7 @@ async def test_unauthenticated_access(
                         f"accessible without any session cookie.",
                         url=res.url,
                         evidence=body[:300],
+                        http_evidence=_ev,
                     ))
         except (httpx.RequestError, asyncio.TimeoutError):
             continue

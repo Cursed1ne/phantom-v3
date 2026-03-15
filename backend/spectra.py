@@ -84,23 +84,63 @@ def _make_finding(
     url: str = "",
     evidence: str = "",
     rule: str = "",
+    http_evidence: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     sev = severity.upper()
+    base: Dict[str, Any] = {
+        "id":               uuid.uuid4().hex,
+        "severity":         sev,
+        "description":      description[:500],
+        "tool":             "SPECTRA",
+        "agent":            "spectra",
+        "module":           "Semantic Policy Extractor & Constraint Tester",
+        "patent":           "Patent Pending — Doshan",
+        "iteration":        1,
+        "cvss":             _CVSS.get(sev, 1.0),
+        "raw_output":       f"rule={rule!r}\nevidence={evidence[:600]}",
+        "url":              url,
+        "created_at":       time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "owasp":            "A01:2021 – Broken Access Control",
+        "cwe":              "CWE-284",
+        # HTTP evidence defaults
+        "request_method":   "",
+        "request_url":      url,
+        "request_headers":  "{}",
+        "request_body":     "",
+        "response_status":  0,
+        "response_headers": "{}",
+        "response_body":    "",
+        "payload":          "",
+        "timing_ms":        0.0,
+    }
+    if http_evidence:
+        base.update(http_evidence)
+    return base
+
+
+def _capture_http_evidence(
+    resp: "httpx.Response",
+    elapsed: float = 0.0,
+    payload: str = "",
+) -> Dict[str, Any]:
+    import json as _json
+    try:
+        req_headers  = dict(resp.request.headers)
+        req_body     = resp.request.content.decode("utf-8", errors="replace")[:1500]
+        resp_body    = resp.text[:2000]
+        resp_headers = dict(resp.headers)
+    except Exception:
+        req_headers = {}; req_body = ""; resp_body = ""; resp_headers = {}
     return {
-        "id":          str(uuid.uuid4()),
-        "severity":    sev,
-        "description": description[:500],
-        "tool":        "SPECTRA",
-        "agent":       "spectra",
-        "module":      "Semantic Policy Extractor & Constraint Tester",
-        "patent":      "Patent Pending — Doshan",
-        "iteration":   1,
-        "cvss":        _CVSS.get(sev, 1.0),
-        "raw_output":  f"rule={rule!r}\nevidence={evidence[:600]}",
-        "url":         url,
-        "created_at":  time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "owasp":       "A01:2021 – Broken Access Control",
-        "cwe":         "CWE-284",
+        "request_method":   getattr(resp.request, "method", ""),
+        "request_url":      str(getattr(resp.request, "url", "")),
+        "request_headers":  _json.dumps(req_headers, default=str),
+        "request_body":     req_body if isinstance(req_body, str) else "",
+        "response_status":  resp.status_code,
+        "response_headers": _json.dumps(resp_headers, default=str),
+        "response_body":    resp_body if isinstance(resp_body, str) else "",
+        "payload":          payload,
+        "timing_ms":        round(elapsed * 1000, 1),
     }
 
 
@@ -259,13 +299,16 @@ async def test_constraint(
     url = await _resolve_resource_url(base_url, constraint.resource, visited_urls)
     method = constraint.method if constraint.method in ("GET", "POST", "PUT", "PATCH", "DELETE") else "GET"
 
+    import time as _time
     try:
         if constraint.test_type == "unauth":
             # Fire request with NO cookies
+            _t0 = _time.time()
             if method == "GET":
                 resp = await session.get(url, cookies={}, timeout=10)
             else:
                 resp = await session.post(url, cookies={}, timeout=10)
+            _ev = _capture_http_evidence(resp, _time.time() - _t0)
 
             # 2xx with non-trivial body = likely unauthorised access
             if resp.status_code in range(200, 300) and len(resp.content) > 100:
@@ -279,14 +322,17 @@ async def test_constraint(
                         url=url,
                         evidence=body,
                         rule=constraint.rule,
+                        http_evidence=_ev,
                     )
 
         elif constraint.test_type == "other_user" and secondary_cookies:
             # Fire request as User B
+            _t0 = _time.time()
             if method == "GET":
                 resp = await session.get(url, cookies=secondary_cookies, timeout=10)
             else:
                 resp = await session.post(url, cookies=secondary_cookies, timeout=10)
+            _ev = _capture_http_evidence(resp, _time.time() - _t0)
 
             if resp.status_code in range(200, 300) and len(resp.content) > 100:
                 body = resp.text[:300]
@@ -300,6 +346,7 @@ async def test_constraint(
                         url=url,
                         evidence=body,
                         rule=constraint.rule,
+                        http_evidence=_ev,
                     )
                 # Softer check: any 200 accessing another user's supposed resource
                 return _make_finding(
@@ -309,6 +356,7 @@ async def test_constraint(
                     url=url,
                     evidence=body[:200],
                     rule=constraint.rule,
+                    http_evidence=_ev,
                 )
 
         elif constraint.test_type in ("non_admin", "role_escalation"):
@@ -317,7 +365,9 @@ async def test_constraint(
                            "/dashboard/admin", "/management", "/superuser"]
             for apath in admin_paths:
                 aurl = base_url.rstrip("/") + apath
+                _t0 = _time.time()
                 resp = await session.get(aurl, cookies=session_cookies, timeout=8)
+                _ev = _capture_http_evidence(resp, _time.time() - _t0)
                 if resp.status_code in range(200, 300) and len(resp.content) > 200:
                     body = resp.text[:300]
                     if not any(kw in body.lower() for kw in ("forbidden", "not authorized")):
@@ -328,6 +378,7 @@ async def test_constraint(
                             url=aurl,
                             evidence=body,
                             rule=constraint.rule,
+                            http_evidence=_ev,
                         )
 
         elif constraint.test_type == "mass_assign":
@@ -337,11 +388,13 @@ async def test_constraint(
                 if not form_url:
                     continue
                 for param in _MASS_ASSIGN_PARAMS:
-                    payload = {param: "admin", "username": "spectra_test",
-                               "email": "spectra@test.local", "password": "Phantom!Test123"}
+                    ma_payload = {param: "admin", "username": "spectra_test",
+                                  "email": "spectra@test.local", "password": "Phantom!Test123"}
                     try:
-                        resp = await session.post(form_url, data=payload,
+                        _t0 = _time.time()
+                        resp = await session.post(form_url, data=ma_payload,
                                                   cookies=session_cookies, timeout=10)
+                        _ev = _capture_http_evidence(resp, _time.time() - _t0, payload=f"{param}=admin")
                         if resp.status_code in range(200, 302):
                             # Check if the privileged param was reflected / accepted
                             if param in resp.text or "admin" in resp.text.lower():
@@ -352,6 +405,7 @@ async def test_constraint(
                                     url=form_url,
                                     evidence=resp.text[:300],
                                     rule=constraint.rule,
+                                    http_evidence=_ev,
                                 )
                     except Exception:
                         continue

@@ -2253,6 +2253,16 @@ function AutopilotView({ defaultHost, onNewFindings }) {
         iter: 1,
         ts: f.created_at || new Date().toISOString(),
         _target: target.trim(),
+        // HTTP evidence
+        request_method:   f.request_method   || '',
+        request_url:      f.request_url      || '',
+        request_headers:  f.request_headers  || '{}',
+        request_body:     f.request_body     || '',
+        response_status:  f.response_status  || 0,
+        response_headers: f.response_headers || '{}',
+        response_body:    f.response_body    || '',
+        payload:          f.payload          || '',
+        timing_ms:        f.timing_ms        || 0,
       }));
       if (mapped.length) onNewFindings(mapped);
 
@@ -2883,6 +2893,26 @@ function GraphView({ findings, targetHost }) {
                   <div>Agent: {selected.finding.agent}</div>
                   <div>CVSS: {selected.finding.cvss}</div>
                   <div style={{ marginTop: 5, color: '#c0c0e0' }}>{selected.finding.desc}</div>
+                  {(selected.finding.request_url || selected.finding.payload) && (
+                    <div style={{ marginTop: 8, background: '#070710', borderRadius: 5, padding: '6px 10px', fontSize: 9 }}>
+                      <div style={{ color: '#38bdf8', fontSize: 7.5, letterSpacing: 1, marginBottom: 3 }}>HTTP EVIDENCE</div>
+                      <div style={{ color: '#a0a0c0', fontFamily: 'var(--font-mono)', fontSize: 9, wordBreak: 'break-all' }}>
+                        {selected.finding.request_method} {(selected.finding.request_url || '').slice(0, 60)}
+                      </div>
+                      {selected.finding.payload && (
+                        <div style={{ marginTop: 3 }}>
+                          <span style={{ color: '#f87171', fontSize: 8, fontWeight: 700 }}>PAYLOAD: </span>
+                          <code style={{ color: '#fbbf24', fontSize: 8 }}>{selected.finding.payload.slice(0, 80)}</code>
+                        </div>
+                      )}
+                      {selected.finding.response_status > 0 && (
+                        <div style={{ color: selected.finding.response_status < 400 ? '#34d399' : '#f87171', marginTop: 3, fontSize: 8 }}>
+                          → {selected.finding.response_status}
+                          {selected.finding.timing_ms ? ` · ${selected.finding.timing_ms}ms` : ''}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -3356,6 +3386,9 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0a0a0f;color:#e8e8f
 .finding{border:1px solid #1e1e30;border-radius:8px;margin-bottom:7px;overflow:hidden}
 .fh{padding:10px 14px;display:flex;align-items:center;gap:10px;background:#0f0f1a}
 .fb{padding:9px 14px;font-size:11px;color:#888;line-height:1.7;border-top:1px solid #1e1e30;font-family:monospace}
+.http-block{background:#070710;border-radius:6px;padding:10px 14px;margin-top:8px;font-family:monospace;font-size:9.5px}
+pre.code{white-space:pre-wrap;word-break:break-all;color:#a0a0c0;max-height:120px;overflow:auto;margin:0}
+details>summary{cursor:pointer;color:#555;font-size:8.5px;letter-spacing:1px;padding:4px 0;user-select:none}
 footer{text-align:center;padding:22px;font-size:9px;color:#33334a;border-top:1px solid #1e1e30;margin-top:36px;font-family:monospace}
 </style></head><body>
 <div class="cover">
@@ -3382,13 +3415,24 @@ footer{text-align:center;padding:22px;font-size:9px;color:#33334a;border-top:1px
   <div class="sec">All Findings</div>
   ${sortedF.map(f => {
     const cfg = SEV_CFG[f.sev || 'INFO'] || SEV_CFG.INFO;
+    const esc = s => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    const httpBlock = f.request_url ? `
+      <details>
+        <summary>📡 HTTP Evidence &mdash; ${esc(f.request_method)} ${f.response_status ? '&rarr; ' + f.response_status : ''} ${f.timing_ms ? '&middot; ' + f.timing_ms + 'ms' : ''}</summary>
+        <div class="http-block">
+          <div style="color:#38bdf8;font-size:8px;letter-spacing:1px;margin-bottom:3px">REQUEST</div>
+          <pre class="code">${esc(f.request_method + ' ' + f.request_url)}${f.request_body ? '\n\n' + esc(f.request_body.slice(0,400)) : ''}</pre>
+          ${f.payload ? `<div style="color:#f87171;font-weight:700;margin-top:4px">PAYLOAD: <code style="color:#fbbf24">${esc(f.payload)}</code></div>` : ''}
+          ${f.response_body ? `<div style="color:#34d399;font-size:8px;letter-spacing:1px;margin:6px 0 3px">RESPONSE ${f.response_status || ''}</div><pre class="code">${esc(f.response_body.slice(0,500))}</pre>` : ''}
+        </div>
+      </details>` : '';
     return `<div class="finding">
       <div class="fh">
         <span class="badge" style="background:${cfg.bg};color:${cfg.color};border-color:${cfg.border}">${f.sev || 'INFO'}</span>
-        <strong style="flex:1">${(f.desc || '').substring(0, 130)}</strong>
-        <span style="font-size:9.5px;color:#555;font-family:monospace">${f.agent || ''} · ${f.tool || ''}</span>
+        <strong style="flex:1">${esc((f.desc || '').substring(0, 130))}</strong>
+        <span style="font-size:9.5px;color:#555;font-family:monospace">${esc(f.agent || '')} · ${esc(f.tool || '')}</span>
       </div>
-      <div class="fb">CVSS: ${f.cvss || 'N/A'} · Agent: ${f.agent || '-'} · Tool: ${f.tool || '-'}</div>
+      <div class="fb">CVSS: ${f.cvss || 'N/A'} · Agent: ${esc(f.agent || '-')} · Tool: ${esc(f.tool || '-')}${httpBlock}</div>
     </div>`;
   }).join('')}
   <footer>PHANTOM AI v3 · Autonomous Penetration Testing Platform · For authorized security testing only</footer>
@@ -3414,6 +3458,13 @@ footer{text-align:center;padding:22px;font-size:9px;color:#33334a;border-top:1px
       findings: findings.map(f => ({
         severity: f.sev, description: f.desc,
         agent: f.agent, tool: f.tool, cvss: f.cvss, iter: f.iter, ts: f.ts,
+        request_method:  f.request_method  || '',
+        request_url:     f.request_url     || '',
+        request_body:    f.request_body    || '',
+        payload:         f.payload         || '',
+        response_status: f.response_status || 0,
+        response_body:   f.response_body   || '',
+        timing_ms:       f.timing_ms       || 0,
       })),
     }, null, 2);
     if (typeof API !== 'undefined' && API?.dialog?.save) {
@@ -3533,6 +3584,36 @@ footer{text-align:center;padding:22px;font-size:9px;color:#33334a;border-top:1px
                           <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: '#555', marginTop: 4 }}>
                             CVSS {f.cvss || 'N/A'} · Agent: {f.agent || '-'} · Tool: {f.tool || '-'}
                           </div>
+                          {(f.request_url || f.payload || f.request_body) && (
+                            <details style={{ marginTop: 6, fontFamily: 'var(--font-mono)', fontSize: 9.5 }}>
+                              <summary style={{ cursor: 'pointer', color: '#555', fontSize: 9, letterSpacing: 1, userSelect: 'none' }}>
+                                📡 HTTP EVIDENCE &nbsp;
+                                {f.request_method && <span style={{ color: '#38bdf8' }}>{f.request_method}</span>}
+                                {f.response_status > 0 && <span style={{ color: f.response_status < 400 ? '#34d399' : '#f87171' }}> → {f.response_status}</span>}
+                                {f.timing_ms > 0 && <span style={{ color: '#555' }}> · {f.timing_ms}ms</span>}
+                              </summary>
+                              <div style={{ background: '#070710', borderRadius: 6, padding: '8px 12px', marginTop: 6 }}>
+                                <div style={{ color: '#38bdf8', fontSize: 8, letterSpacing: 1, marginBottom: 3 }}>REQUEST</div>
+                                <pre style={{ color: '#a0a0c0', fontSize: 9, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 100, overflow: 'auto', margin: 0 }}>
+                                  {`${f.request_method} ${f.request_url}`}{f.request_body ? `\n\n${f.request_body.slice(0, 400)}` : ''}
+                                </pre>
+                                {f.payload && (
+                                  <div style={{ marginTop: 4 }}>
+                                    <span style={{ color: '#f87171', fontWeight: 700 }}>PAYLOAD: </span>
+                                    <code style={{ color: '#fbbf24' }}>{f.payload}</code>
+                                  </div>
+                                )}
+                                {f.response_body && (
+                                  <>
+                                    <div style={{ color: '#34d399', fontSize: 8, letterSpacing: 1, margin: '6px 0 3px' }}>RESPONSE {f.response_status}</div>
+                                    <pre style={{ color: '#a0a0c0', fontSize: 9, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 100, overflow: 'auto', margin: 0 }}>
+                                      {f.response_body.slice(0, 500)}
+                                    </pre>
+                                  </>
+                                )}
+                              </div>
+                            </details>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -3597,6 +3678,9 @@ body{font-family:'Inter',sans-serif;background:#0a0a0f;color:#e8e8f0;min-height:
 .finding{border:1px solid #1e1e30;border-radius:8px;margin-bottom:7px;overflow:hidden}
 .fh{padding:10px 14px;display:flex;align-items:center;gap:10px;background:#0f0f1a}
 .fb{padding:9px 14px;font-size:11px;color:#666;line-height:1.7;border-top:1px solid #1e1e30}
+.http-block{background:#070710;border-radius:6px;padding:10px 14px;margin-top:8px;font-family:monospace;font-size:9.5px}
+pre.code{white-space:pre-wrap;word-break:break-all;color:#a0a0c0;max-height:120px;overflow:auto;margin:0}
+details>summary{cursor:pointer;color:#555;font-size:8.5px;letter-spacing:1px;padding:4px 0;user-select:none}
 table{width:100%;border-collapse:collapse;font-size:11px}
 th{background:#0f0f1a;padding:8px 12px;text-align:left;font-family:'JetBrains Mono';font-size:8px;letter-spacing:2px;color:#555;border-bottom:1px solid #1e1e30}
 td{padding:9px 12px;border-bottom:1px solid #141420}
@@ -3632,14 +3716,27 @@ footer{text-align:center;padding:22px;font-family:'JetBrains Mono';font-size:9px
     <div class="sc sc-L"><div class="sc-num">${fLow}</div><div class="sc-lbl">LOW</div></div>
   </div>
   <div class="sec">CRITICAL & HIGH FINDINGS</div>
-  ${[...critF, ...highF].map(f => `<div class="finding">
+  ${[...critF, ...highF].map(f => {
+    const escH = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const httpEv = f.request_url ? `
+      <details>
+        <summary>📡 HTTP Evidence &mdash; ${escH(f.request_method)} ${f.response_status ? '&rarr; ' + f.response_status : ''} ${f.timing_ms ? '&middot; ' + f.timing_ms + 'ms' : ''}</summary>
+        <div class="http-block">
+          <div style="color:#38bdf8;font-size:8px;letter-spacing:1px;margin-bottom:3px">REQUEST</div>
+          <pre class="code">${escH(f.request_method + ' ' + f.request_url)}${f.request_body ? '\n\n' + escH(f.request_body.slice(0,400)) : ''}</pre>
+          ${f.payload ? `<div style="color:#f87171;font-weight:700;margin-top:4px">PAYLOAD: <code style="color:#fbbf24">${escH(f.payload)}</code></div>` : ''}
+          ${f.response_body ? `<div style="color:#34d399;font-size:8px;letter-spacing:1px;margin:6px 0 3px">RESPONSE ${f.response_status||''}</div><pre class="code">${escH(f.response_body.slice(0,500))}</pre>` : ''}
+        </div>
+      </details>` : '';
+    return `<div class="finding">
     <div class="fh">
       <span class="badge b-${f.sev[0]}">${f.sev}</span>
-      <strong>${f.desc.substring(0, 120)}</strong>
-      <span style="margin-left:auto;font-family:'JetBrains Mono';font-size:9.5px;color:#555">${f.agent} · ${f.tool}</span>
+      <strong>${escH(f.desc.substring(0, 120))}</strong>
+      <span style="margin-left:auto;font-family:'JetBrains Mono';font-size:9.5px;color:#555">${escH(f.agent)} · ${escH(f.tool)}</span>
     </div>
-    <div class="fb">CVSS: ${f.cvss} · Agent: ${f.agent} · Tool: ${f.tool} · Iteration #${f.iter} · ${new Date(f.ts).toLocaleTimeString()}</div>
-  </div>`).join('')}
+    <div class="fb">CVSS: ${f.cvss} · Agent: ${escH(f.agent)} · Tool: ${escH(f.tool)} · Iteration #${f.iter} · ${new Date(f.ts).toLocaleTimeString()}${httpEv}</div>
+  </div>`;
+  }).join('')}
   <div class="sec">ALL FINDINGS</div>
   <table><thead><tr><th>SEV</th><th>DESCRIPTION</th><th>AGENT</th><th>TOOL</th><th>CVSS</th><th>ITER</th></tr></thead><tbody>
   ${sorted.map(f => `<tr>

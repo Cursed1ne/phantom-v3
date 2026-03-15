@@ -75,23 +75,68 @@ def _make_finding(
     description: str,
     url: str = "",
     evidence: str = "",
+    http_evidence: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     sev = severity.upper()
+    base: Dict[str, Any] = {
+        "id":               str(uuid.uuid4()),
+        "severity":         sev,
+        "description":      description[:500],
+        "tool":             "RIFT",
+        "agent":            "rift",
+        "module":           "Race Condition & Timing Side-Channel Finder",
+        "patent":           "Patent Pending — Doshan",
+        "iteration":        1,
+        "cvss":             _CVSS.get(sev, 1.0),
+        "raw_output":       evidence[:600],
+        "url":              url,
+        "created_at":       time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "owasp":            "A04:2021 – Insecure Design",
+        "cwe":              "CWE-362",
+        # HTTP evidence defaults
+        "request_method":   "",
+        "request_url":      url,
+        "request_headers":  "{}",
+        "request_body":     "",
+        "response_status":  0,
+        "response_headers": "{}",
+        "response_body":    "",
+        "payload":          "",
+        "timing_ms":        0.0,
+    }
+    if http_evidence:
+        base.update(http_evidence)
+    return base
+
+
+def _capture_http_evidence_from_responses(
+    responses: List[Optional[httpx.Response]],
+    endpoint: "RacyEndpoint",
+) -> Optional[Dict[str, Any]]:
+    """Build HTTP evidence from the first successful burst response."""
+    import json as _json
+    first = next((r for r in responses if r is not None and 200 <= r.status_code < 300), None)
+    if first is None:
+        first = next((r for r in responses if r is not None), None)
+    if first is None:
+        return None
+    try:
+        req_headers  = dict(first.request.headers)
+        req_body     = first.request.content.decode("utf-8", errors="replace")[:1500]
+        resp_body    = first.text[:2000]
+        resp_headers = dict(first.headers)
+    except Exception:
+        req_headers = {}; req_body = ""; resp_body = ""; resp_headers = {}
     return {
-        "id":          str(uuid.uuid4()),
-        "severity":    sev,
-        "description": description[:500],
-        "tool":        "RIFT",
-        "agent":       "rift",
-        "module":      "Race Condition & Timing Side-Channel Finder",
-        "patent":      "Patent Pending — Doshan",
-        "iteration":   1,
-        "cvss":        _CVSS.get(sev, 1.0),
-        "raw_output":  evidence[:600],
-        "url":         url,
-        "created_at":  time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "owasp":       "A04:2021 – Insecure Design",
-        "cwe":         "CWE-362",
+        "request_method":   endpoint.method,
+        "request_url":      endpoint.url,
+        "request_headers":  _json.dumps(req_headers, default=str),
+        "request_body":     req_body if isinstance(req_body, str) else "",
+        "response_status":  first.status_code,
+        "response_headers": _json.dumps(resp_headers, default=str),
+        "response_body":    resp_body if isinstance(resp_body, str) else "",
+        "payload":          f"Burst×{_BURST_COUNT}: {endpoint.reason}",
+        "timing_ms":        0.0,
     }
 
 
@@ -217,12 +262,14 @@ def _analyze_burst(
         severity = "HIGH"
 
     evidence = " | ".join(evidence_parts)
+    http_ev = _capture_http_evidence_from_responses(responses, endpoint)
     return _make_finding(
         severity,
         f"Race Condition (TOCTOU): {endpoint.url} — {evidence}. "
         f"Reason: {endpoint.reason}",
         url=endpoint.url,
         evidence=evidence,
+        http_evidence=http_ev,
     )
 
 
@@ -264,6 +311,18 @@ async def test_timing_sidechannel(
         f"invalid_mean={statistics.mean(invalid_times)*1000:.0f}ms "
         f"delta={delta*1000:.0f}ms"
     )
+    import json as _json
+    timing_ev: Dict[str, Any] = {
+        "request_method":   "GET",
+        "request_url":      url,
+        "request_headers":  "{}",
+        "request_body":     "",
+        "response_status":  0,
+        "response_headers": "{}",
+        "response_body":    evidence,
+        "payload":          f"{param}={valid_val} vs {param}={invalid_val}",
+        "timing_ms":        round(delta * 1000, 1),
+    }
     return _make_finding(
         "MEDIUM",
         f"Timing Side-Channel at {url}: parameter '{param}' reveals valid/invalid "
@@ -271,6 +330,7 @@ async def test_timing_sidechannel(
         f"Enables user enumeration.",
         url=url,
         evidence=evidence,
+        http_evidence=timing_ev,
     )
 
 

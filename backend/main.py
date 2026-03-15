@@ -85,16 +85,25 @@ def init_db() -> sqlite3.Connection:
 
     -- One row per vulnerability finding
     CREATE TABLE IF NOT EXISTS findings (
-        id          TEXT PRIMARY KEY,
-        session_id  TEXT NOT NULL,
-        severity    TEXT NOT NULL,            -- CRITICAL | HIGH | MEDIUM | LOW | INFO
-        description TEXT NOT NULL,
-        agent       TEXT,                     -- which agent found it
-        tool        TEXT,                     -- which tool produced it
-        iteration   INTEGER DEFAULT 0,
-        cvss        REAL DEFAULT 0,
-        raw_output  TEXT,                     -- truncated tool output that triggered it
-        created_at  TEXT NOT NULL,
+        id               TEXT PRIMARY KEY,
+        session_id       TEXT NOT NULL,
+        severity         TEXT NOT NULL,            -- CRITICAL | HIGH | MEDIUM | LOW | INFO
+        description      TEXT NOT NULL,
+        agent            TEXT,                     -- which agent found it
+        tool             TEXT,                     -- which tool produced it
+        iteration        INTEGER DEFAULT 0,
+        cvss             REAL DEFAULT 0,
+        raw_output       TEXT,                     -- truncated tool output that triggered it
+        created_at       TEXT NOT NULL,
+        request_method   TEXT DEFAULT '',
+        request_url      TEXT DEFAULT '',
+        request_headers  TEXT DEFAULT '{}',
+        request_body     TEXT DEFAULT '',
+        response_status  INTEGER DEFAULT 0,
+        response_headers TEXT DEFAULT '{}',
+        response_body    TEXT DEFAULT '',
+        payload          TEXT DEFAULT '',
+        timing_ms        REAL DEFAULT 0,
         FOREIGN KEY (session_id) REFERENCES sessions(id)
     );
 
@@ -179,6 +188,15 @@ def init_db() -> sqlite3.Connection:
         "ALTER TABLE learned ADD COLUMN confidence REAL DEFAULT 0.5",
         "ALTER TABLE learned ADD COLUMN first_seen TEXT",
         "ALTER TABLE findings ADD COLUMN confirmed INTEGER DEFAULT 1",
+        "ALTER TABLE findings ADD COLUMN request_method TEXT DEFAULT ''",
+        "ALTER TABLE findings ADD COLUMN request_url TEXT DEFAULT ''",
+        "ALTER TABLE findings ADD COLUMN request_headers TEXT DEFAULT '{}'",
+        "ALTER TABLE findings ADD COLUMN request_body TEXT DEFAULT ''",
+        "ALTER TABLE findings ADD COLUMN response_status INTEGER DEFAULT 0",
+        "ALTER TABLE findings ADD COLUMN response_headers TEXT DEFAULT '{}'",
+        "ALTER TABLE findings ADD COLUMN response_body TEXT DEFAULT ''",
+        "ALTER TABLE findings ADD COLUMN payload TEXT DEFAULT ''",
+        "ALTER TABLE findings ADD COLUMN timing_ms REAL DEFAULT 0",
         # Chat session migrations (idempotent)
         "ALTER TABLE chat_sessions ADD COLUMN model TEXT DEFAULT 'llama3.1'",
         "ALTER TABLE chat_sessions ADD COLUMN context_json TEXT DEFAULT '{}'",
@@ -1050,7 +1068,14 @@ async def autopilot_run(req: AutopilotRequest):
         findings: List[Dict[str, Any]] = []
         seen = set()
 
-        def push_finding(severity: str, description: str, tool: str = "autopilot", agent: str = "web", cvss: Optional[float] = None):
+        def push_finding(
+            severity: str, description: str, tool: str = "autopilot", agent: str = "web",
+            cvss: Optional[float] = None,
+            request_method: str = "", request_url: str = "",
+            request_headers: str = "{}", request_body: str = "",
+            response_status: int = 0, response_headers: str = "{}",
+            response_body: str = "", payload: str = "", timing_ms: float = 0.0,
+        ):
             sev = str(severity or "").strip().upper()
             if sev not in DEFAULT_CVSS:
                 sev = "INFO"
@@ -1072,6 +1097,15 @@ async def autopilot_run(req: AutopilotRequest):
                 "cvss": cvss if cvss is not None else DEFAULT_CVSS.get(sev, 1.0),
                 "raw_output": "",
                 "created_at": datetime.utcnow().isoformat(),
+                "request_method": request_method,
+                "request_url": request_url,
+                "request_headers": request_headers,
+                "request_body": request_body,
+                "response_status": response_status,
+                "response_headers": response_headers,
+                "response_body": response_body,
+                "payload": payload,
+                "timing_ms": timing_ms,
             })
 
         # Parse each tool output with existing parser.
@@ -1106,16 +1140,32 @@ async def autopilot_run(req: AutopilotRequest):
                 description=mf.get("description", "Autopilot note"),
                 tool=mf.get("tool", "autopilot"),
                 agent="web",
+                request_method=mf.get("request_method", ""),
+                request_url=mf.get("request_url", ""),
+                request_headers=mf.get("request_headers", "{}"),
+                request_body=mf.get("request_body", ""),
+                response_status=mf.get("response_status", 0),
+                response_headers=mf.get("response_headers", "{}"),
+                response_body=mf.get("response_body", ""),
+                payload=mf.get("payload", ""),
+                timing_ms=mf.get("timing_ms", 0.0),
             )
 
         for f in findings:
             _db.execute(
-                "INSERT INTO findings (id, session_id, severity, description, agent, tool, iteration, cvss, raw_output, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO findings "
+                "(id, session_id, severity, description, agent, tool, iteration, cvss, raw_output, created_at, "
+                "request_method, request_url, request_headers, request_body, "
+                "response_status, response_headers, response_body, payload, timing_ms) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     f["id"], f["session_id"], f["severity"], f["description"], f.get("agent"),
                     f.get("tool"), f.get("iteration", 1), f.get("cvss", 0.0),
                     f.get("raw_output", ""), f["created_at"],
+                    f.get("request_method", ""), f.get("request_url", ""),
+                    f.get("request_headers", "{}"), f.get("request_body", ""),
+                    f.get("response_status", 0), f.get("response_headers", "{}"),
+                    f.get("response_body", ""), f.get("payload", ""), f.get("timing_ms", 0.0),
                 )
             )
 

